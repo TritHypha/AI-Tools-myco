@@ -1,0 +1,13 @@
+# build output
+dist/
+
+# dependencies
+node_modules/
+
+# the myco index itself (never commit an index)
+.myco/
+
+# logs / os cruft
+*.log
+.DS_Store
+Thumbs.db
