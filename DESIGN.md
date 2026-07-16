@@ -190,3 +190,26 @@ type-stripping — no build step. Coverage: tokenization/folding, the ignore wal
 size cap, and the search matrix (word vs substring precision, smart-case,
 filename search, regex, no-match). The precision claim (word ⊊ substring) is
 pinned by an assertion, not just documented.
+
+## 12. Ternary / 3rd-axis speed R&D (KB RD-0440)
+
+*Design-stage, benchmark-gated; no perf number claimed. Honest framing: myco's edge is the persistent graph, not
+cold-scan throughput — these sharpen the repeat-query advantage, they do not make myco ripgrep.*
+
+Where a **genuinely ternary** idea targets a real hot-path cost (both verified in `src/query/search.ts`):
+
+- **Win 1 — a ternary prune-verdict {definite-hit / definite-miss / needs-verify} + a positional index.** For a
+  *word* query the posting is authoritative (the file definitely contains the term), so with a `term → (file,
+  [line,col])` positional index the verdict is DEFINITE-HIT and the phase-2 **re-read is skipped**; substring/regex
+  stay the third value (NEEDS-VERIFY — the posting over-approximates). Targets §10 #2 (the re-read); highest-value, a
+  0.2 candidate.
+- **Win 2 — a ternary search trie (TST) for the term dictionary.** The substring prune's whole-dictionary `.includes`
+  scan is the classic TST case (the 3-way `<=>` branch) for **prefix** candidate lookup. Honest bound: a TST helps
+  prefix, not arbitrary contains-substring (that wants a trigram / suffix index).
+- **Win 3 — a ternary binary-sniff {text / binary / indeterminate-encoding}.** Adds an INDETERMINATE bucket routed to
+  a deeper encoding probe, fixing the UTF-16-sniffed-as-binary skip without slowing the common 2-valued path
+  (correctness-first).
+
+**Not applicable (honest):** the governance three-valued logic (K3 authorization) and photonic acceleration are
+irrelevant to a local read-only search tool's speed. The word-query prune is already `Map`-fast; the 3rd axis speeds
+the *verify*, not the prune. Full assessment: KB `RD-0440`.
