@@ -25,6 +25,7 @@ export interface IndexStats {
   unchanged: number; // reused from the previous index
   removed: number; // dropped because they vanished
   skippedBinary: number; // detected as binary and skipped
+  skippedLarge: number; // skipped for exceeding maxFileSize (reported, never silent)
 }
 
 export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
@@ -35,7 +36,7 @@ export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
 export async function buildIndex(
   root: string,
   opts: IndexOptions = DEFAULT_INDEX_OPTIONS,
-): Promise<{ graph: SearchGraph; stats: IndexStats }> {
+): Promise<{ graph: SearchGraph; stats: IndexStats; skippedLargePaths: string[] }> {
   const prior = await loadGraph(root);
   const graph = prior?.graph ?? new SearchGraph();
 
@@ -46,9 +47,11 @@ export async function buildIndex(
     unchanged: 0,
     removed: 0,
     skippedBinary: 0,
+    skippedLarge: 0,
   };
 
-  const metas = await walk(root, opts);
+  const skippedLargePaths: string[] = [];
+  const metas = await walk(root, opts, skippedLargePaths);
   const seen = new Set<string>();
 
   for (const meta of metas) {
@@ -88,7 +91,8 @@ export async function buildIndex(
     }
   }
 
+  stats.skippedLarge = skippedLargePaths.length;
   stats.files = graph.fileCount();
   await saveGraph(root, graph);
-  return { graph, stats };
+  return { graph, stats, skippedLargePaths };
 }

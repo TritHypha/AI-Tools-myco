@@ -99,6 +99,7 @@ function isIgnored(rules: Rule[], relPath: string, isDir: boolean): boolean {
 export async function walk(
   root: string,
   opts: WalkOptions,
+  skippedLarge?: string[], // out: paths skipped for exceeding maxFileSize — reported, never silent
 ): Promise<FileMeta[]> {
   const rules = await loadRules(root, opts.useGitignore);
   const out: FileMeta[] = [];
@@ -125,7 +126,10 @@ export async function walk(
         } catch {
           continue;
         }
-        if (st.size > opts.maxFileSize) continue;
+        if (st.size > opts.maxFileSize) {
+          skippedLarge?.push(rel); // a bounded coverage cap must be visible, not silent
+          continue;
+        }
         out.push({
           relPath: rel,
           absPath: path.join(absDir, ent.name),

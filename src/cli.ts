@@ -96,14 +96,24 @@ function useColor(values: Record<string, unknown>): boolean {
 
 async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   const started = process.hrtime.bigint();
-  const { stats } = await buildIndex(root, index);
+  const { stats, skippedLargePaths } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   process.stderr.write(
     `indexed ${stats.files} files ` +
       `(+${stats.added} ~${stats.updated} -${stats.removed}, ` +
-      `${stats.unchanged} unchanged, ${stats.skippedBinary} binary skipped) ` +
+      `${stats.unchanged} unchanged, ${stats.skippedBinary} binary skipped, ` +
+      `${stats.skippedLarge} over-size skipped) ` +
       `in ${ms.toFixed(0)}ms\n`,
   );
+  // No silent caps: name the files that fell outside the index, so a search that
+  // returns nothing is never mistaken for "not present" (DESIGN §8/§10).
+  if (skippedLargePaths.length > 0) {
+    const mib = (index.maxFileSize / (1024 * 1024)).toFixed(0);
+    process.stderr.write(
+      `  ${skippedLargePaths.length} file(s) exceed --max-size (${mib} MiB) — NOT searchable:\n`,
+    );
+    for (const p of skippedLargePaths) process.stderr.write(`    ${p}\n`);
+  }
   return 0;
 }
 
@@ -153,7 +163,17 @@ async function cmdSearch(
     if ((await loadGraph(root)) === null) {
       process.stderr.write(`myco: indexing ${path.resolve(root)} (first run)…\n`);
     }
-    graph = (await buildIndex(root, iOpts)).graph;
+    const built = await buildIndex(root, iOpts);
+    graph = built.graph;
+    // Surface an over-size skip even on the search path — otherwise an oversized file
+    // silently misses and a zero-result search reads as "absent" (the recurring
+    // "we keep missing things" failure). stderr only, so JSON/piped stdout stays clean.
+    if (!values["json"] && built.skippedLargePaths.length > 0) {
+      process.stderr.write(
+        `myco: note — ${built.skippedLargePaths.length} file(s) over --max-size ` +
+          `not searched (run \`myco index\` to list them)\n`,
+      );
+    }
   }
 
   const outcome = await search(root, graph, pattern, sOpts);

@@ -38,13 +38,28 @@ test("walk honours .mycoignore basename globs and directory rules", async () => 
   }
 });
 
-test("walk skips files over the size cap", async () => {
+test("walk skips files over the size cap AND reports them (no silent drop)", async () => {
   const dir = await tmpTree({ "small.txt": "x", "big.txt": "y".repeat(1000) });
   try {
-    const metas = await walk(dir, { maxFileSize: 100, useGitignore: false });
+    const skippedLarge: string[] = [];
+    const metas = await walk(dir, { maxFileSize: 100, useGitignore: false }, skippedLarge);
     const rels = new Set(metas.map((m) => m.relPath));
     assert.ok(rels.has("small.txt"));
     assert.ok(!rels.has("big.txt"), "big.txt exceeds the cap");
+    // The cap must be VISIBLE, not silent — the over-size file is named in the out-list
+    // so a caller (index/search) can tell the user what fell outside the index.
+    assert.deepEqual(skippedLarge, ["big.txt"], "over-size file is reported, never silently dropped");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("walk leaves the skip-list empty when nothing exceeds the cap", async () => {
+  const dir = await tmpTree({ "a.txt": "x", "b.txt": "yy" });
+  try {
+    const skippedLarge: string[] = [];
+    await walk(dir, { maxFileSize: 1 << 20, useGitignore: false }, skippedLarge);
+    assert.deepEqual(skippedLarge, [], "no false positives when every file fits");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
