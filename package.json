@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "myco",
-  "version": "0.1.0",
-  "description": "grep, but it grows a graph — a graph-indexed search tool for file contents and filenames. Smart-case, token-precise, and instant on repeat searches.",
+  "version": "0.1.1",
+  "description": "grep, but it grows a graph â€” a graph-indexed search tool for file contents and filenames. Smart-case, token-precise, and instant on repeat searches.",
   "type": "module",
   "bin": {
     "myco": "dist/cli.js"

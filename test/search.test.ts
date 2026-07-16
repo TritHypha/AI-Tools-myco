@@ -11,6 +11,13 @@ const FIXTURES: Record<string, string> = {
   "a.txt": "the cat sat\nconcatenate the category\n",
   "b.md": "Cat and dog\nCATALOG\n",
   "sub/c.js": "function graph() {}\nconst searchGraph = 1\n",
+  // extension-query fixtures: ordinary stems (word char before the dot — the
+  // shape word boundaries could never match), a decoy DIRECTORY named like the
+  // extension, and a decoy suffix that only a sloppy substring would take.
+  "gate/cold-boot.fungi": "flow x\n",
+  "gate/power.fungi": "flow y\n",
+  "fungi/notes.txt": "about\n",
+  "gate/notes.fungi.bak": "z\n",
 };
 
 async function fixtureTree(): Promise<string> {
@@ -99,6 +106,33 @@ test("a query with no matches returns nothing", async () => {
   try {
     const hits = await run(dir, "zzznotpresent", { mode: "word" });
     assert.equal(hits.length, 0);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("filename search: a leading-dot query is an extension match (the .fungi fix)", async () => {
+  const dir = await fixtureTree();
+  try {
+    // The field defect: '-f .fungi' in word mode matched ~0 ordinary stems,
+    // because the word-boundary lookbehind at the dot demands a non-word char
+    // and a stem's last char is a word char. Leading-dot => endsWith semantics.
+    const hits = await run(dir, ".fungi", { files: true, mode: "word" });
+    const paths = hits.map((m) => m.path).sort();
+    assert.deepEqual(paths, ["gate/cold-boot.fungi", "gate/power.fungi"]);
+    // decoys excluded: a DIRECTORY named 'fungi' and a '.fungi.bak' suffix.
+    assert.ok(!paths.some((p) => p.startsWith("fungi/")));
+    assert.ok(!paths.some((p) => p.endsWith(".bak")));
+    // multi-dot suffixes work the same way (endsWith, not token match)
+    const bak = await run(dir, ".fungi.bak", { files: true, mode: "word" });
+    assert.equal(bak.length, 1);
+    assert.ok(bak[0]?.path.endsWith("notes.fungi.bak"));
+    // smart-case still applies: a capital forces sensitivity => no hits
+    const caps = await run(dir, ".FUNGI", { files: true, mode: "word" });
+    assert.equal(caps.length, 0);
+    // content search is untouched by the special case
+    const content = await run(dir, ".fungi", { files: false, mode: "word" });
+    assert.equal(content.length, 0);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

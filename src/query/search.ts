@@ -240,6 +240,21 @@ export async function search(
     return { error: `invalid ${opts.mode} pattern: ${(e as Error).message}` };
   }
 
+  // Filename search: a leading-dot, slash-free WORD query is an EXTENSION query.
+  // Word boundaries can never express ".fungi" against "cold-boot.fungi" — the
+  // lookbehind at the dot demands a non-word char, but a stem's last char is a
+  // word char, so the dotted query silently under-matches (found in the field:
+  // 283/447 .fungi files). "-f .ext" therefore means "path ends with .ext".
+  if (
+    opts.files &&
+    opts.mode === "word" &&
+    query.length > 1 &&
+    query.startsWith(".") &&
+    !query.includes("/")
+  ) {
+    matcher = new RegExp(`${escapeRegExp(query)}$`, sensitive ? "gu" : "giu");
+  }
+
   if (opts.files) return searchNames(graph, matcher, opts.limit);
 
   const ids = candidates(graph, queryTerms(query), opts.mode);
