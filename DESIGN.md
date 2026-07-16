@@ -141,7 +141,11 @@ myco reads files and writes only `./.myco/`. Notable choices:
 - **Symlinks are not followed** during the walk — avoids cycles and escaping the
   root.
 - **No code execution, no network.** Pure Node built-ins; nothing is `eval`'d.
-- **Binary + size caps** bound memory and avoid junk terms.
+- **Binary + size caps** bound memory and avoid junk terms — and the size cap is
+  **visible, never silent**: over-size skips are counted in the index stats,
+  named one-per-line by `myco index`, and flagged with a one-line note on the
+  search path (stderr only, so piped/JSON stdout stays clean). A bounded
+  coverage cap that hides what it dropped turns "no matches" into a lie.
 - Regex is user-supplied and run only against file text (no ReDoS mitigation yet
   — see §10).
 
@@ -171,6 +175,13 @@ forward/inverted split already supports adding a second edge type.
 - **No ReDoS guard** on user regex. A future version should bound backtracking or
   use a linear engine.
 - **Ignore is a subset**, not full gitignore (§7).
+- **Content-skipped files are name-invisible too.** A binary or over-size file
+  gets no file node at all, so `-f` filename search cannot find it either —
+  the same "miss reads as absent" failure the over-size reporting now guards
+  on the content side (over-size paths are at least listed by `myco index`).
+  Candidate fix: index content-skipped files with an empty term set, so the
+  name index still sees them; the prune phase would never surface them for
+  content queries (no terms), so content search semantics are unchanged.
 
 ## 11. Testing
 
