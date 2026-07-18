@@ -15,6 +15,7 @@ import * as path from "node:path";
 
 import type { FileId, SearchGraph } from "../graph/model.ts";
 import { foldCase, hasUpper, wordScanner } from "../util/normalize.ts";
+import { assessRegexSafety, MAX_REGEX_LINE_LEN, SEARCH_TIME_BUDGET_MS } from "./regex-guard.ts";
 
 export type MatchMode = "word" | "substring" | "regex";
 
@@ -126,9 +127,12 @@ function scanLine(
   matcher: RegExp,
 ): Array<{ col: number; length: number }> {
   const hits: Array<{ col: number; length: number }> = [];
+  // Bound the input to any single exec — the ReDoS input-size guard. Positions in
+  // the prefix are identical to the original line, so reported columns stay valid.
+  const hay = line.length > MAX_REGEX_LINE_LEN ? line.slice(0, MAX_REGEX_LINE_LEN) : line;
   matcher.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = matcher.exec(line)) !== null) {
+  while ((m = matcher.exec(hay)) !== null) {
     hits.push({ col: m.index + 1, length: m[0].length });
     if (m[0].length === 0) matcher.lastIndex++; // guard against zero-width loops
   }
@@ -231,6 +235,13 @@ export async function search(
   opts: SearchOptions,
 ): Promise<SearchOutcome> {
   if (query === "") return { error: "empty query" };
+  // ReDoS guard: refuse an exponential-by-construction pattern BEFORE it is compiled
+  // or run (fail-closed). Ordinary patterns pass; the input cap + time budget below
+  // bound whatever the static check conservatively allows.
+  if (opts.mode === "regex") {
+    const verdict = assessRegexSafety(query);
+    if (!verdict.safe) return { error: `unsafe regex refused (ReDoS guard): ${verdict.reason}` };
+  }
   const sensitive = resolveSensitivity(query, opts.caseSensitive);
 
   let matcher: RegExp;
@@ -265,7 +276,19 @@ export async function search(
 
   const all: Match[] = [];
   const filesMatched = new Set<string>();
+  const startedAt = Date.now();
+  let budgetExceeded = false;
+  let searched = 0;
   for (const rec of records) {
+    // Wall-clock ceiling — a slow-but-not-refused pattern cannot run forever. We
+    // stop between files (a single exec is already bounded by scanLine's input cap).
+    // Reporting the real `searched` count + `truncated` keeps myco's "never mistake
+    // nothing for absent" contract honest (DESIGN §8/§10).
+    if (Date.now() - startedAt > SEARCH_TIME_BUDGET_MS) {
+      budgetExceeded = true;
+      break;
+    }
+    searched++;
     const abs = path.join(root, rec.path);
     const hits = await matchFile(abs, rec.path, matcher, opts.context);
     if (hits.length > 0) {
@@ -277,8 +300,8 @@ export async function search(
   const ranked = rank(all);
   return {
     matches: ranked.slice(0, opts.limit),
-    filesSearched: records.length,
+    filesSearched: searched,
     filesMatched: filesMatched.size,
-    truncated: ranked.length > opts.limit,
+    truncated: ranked.length > opts.limit || budgetExceeded,
   };
 }
