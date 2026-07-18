@@ -48,6 +48,11 @@ between "find the word I meant" and "find my letters anywhere".
   — **and says so**: over-size skips are counted, listed by `myco index`, and
   noted on the search path. A coverage cap is never a silent one.
 - **Zero runtime dependencies.** Pure Node built-ins.
+- **ReDoS-guarded regex** — a user `-e` pattern that is exponential by construction
+  (nested unbounded quantifiers like `(a+)+`, absurd repetition counts) is **refused
+  before it runs**, and matching is bounded by an input-length cap and a wall-clock
+  budget. A search can never be turned into a hang. (A mitigation, not full immunity —
+  that needs a non-backtracking engine; the refusal + bounds close the practical hole.)
 
 ## Install
 
