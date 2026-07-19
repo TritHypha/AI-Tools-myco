@@ -28,6 +28,37 @@ Searching `cat` will **not** drag in `concatenate`, `category`, or `location` �
 unless you ask for a substring (`-s`) or a regex (`-e`). That is the difference
 between "find the word I meant" and "find my letters anywhere".
 
+### Word boundaries are applied per edge
+
+A word-boundary test is applied **only at an edge whose own character is a word
+character**. That makes call-site search work the way you expect:
+
+```
+$ myco "handleRequest("      # finds handleRequest(req), handleRequest(), handleRequest("x")
+                             # does NOT match inside reHandleRequest(
+```
+
+The leading `h` is a word character, so the left edge is still protected. The
+trailing `(` is not, so myco does not demand a non-word character *after* the
+paren — which would reject every call site that passes a variable. (This differs
+from `grep -w`, which applies both edges unconditionally; grep's default is not
+`-w`, while myco's *is*, so the same rule would be a trap here.)
+
+### A narrow result always says it is narrow
+
+If whole-word matching throws away files that do contain your pattern, myco tells
+you, and names the flag that gets them back:
+
+```
+$ myco "handleRequest(r"
+0 hits · 0 files · (44 searched) · 4 files contain the pattern but were
+excluded by whole-word matching — try -s
+```
+
+Zero hits there is *correct* — a whole-word pattern has to end at a boundary — but
+you should never have to guess whether zero means "absent" or "filtered". Same
+rule as the over-size skip note: **a coverage cap is never a silent one.**
+
 ## Features
 
 - **Graph index** — files and terms are nodes; `file --contains--> term` are
@@ -59,7 +90,7 @@ between "find the word I meant" and "find my letters anywhere".
 Requires Node.js 18+ (Node 22.6+ to run from source without building).
 
 ```
-git clone <repo> && cd myco
+git clone https://github.com/TritHypha/myco.git && cd myco
 npm install
 npm run build
 npm link          # puts `myco` on your PATH
@@ -133,6 +164,45 @@ grep; every search after that reads the index plus only the candidate files.
 - Worker-thread parallel indexing for large trees.
 - A compact binary index format.
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the
+design constraints (zero runtime dependencies, erasable-syntax TypeScript), and
+what a good test looks like here.
+
+There is one rule worth repeating outside that file: **a search result that is
+narrower than the truth must say so.** myco's whole value is that you can trust a
+miss, and every release so far has fixed a case where something was quietly
+dropped. If your change can narrow a result, make the narrowing visible.
+
+By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Security
+
+Found a vulnerability? **Please do not open a public issue** — use a
+[GitHub private security advisory](https://github.com/TritHypha/myco/security/advisories/new)
+or email `hello@trithypha.dev`. Full policy, threat model and scope:
+[SECURITY.md](SECURITY.md).
+
+## Sponsorship
+
+myco is free, Apache-2.0, and has no runtime dependencies — and it is maintained
+in the open by a small team. If it saves you time, you can
+[sponsor the work on GitHub](https://github.com/sponsors/TritHypha). Sponsorship
+supports maintenance of myco and the wider TritHypha open-source effort. Nothing
+in the tool is gated behind it, and nothing ever will be.
+
+For commercial support or sponsorship enquiries: `hello@trithypha.dev`.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-MIT — see [LICENSE](LICENSE). Contributions welcome.
+**Apache License 2.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Contributions are accepted under the same licence (Apache-2.0 §5): you keep your
+copyright, and you grant the project the licence in the file. There is no CLA.
+
+Copyright 2026 Phillip Booth.

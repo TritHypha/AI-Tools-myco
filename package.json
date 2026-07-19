@@ -13,8 +13,23 @@
     "dist",
     "README.md",
     "DESIGN.md",
-    "LICENSE"
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TritHypha/myco.git"
+  },
+  "homepage": "https://github.com/TritHypha/myco#readme",
+  "bugs": {
+    "url": "https://github.com/TritHypha/myco/issues",
+    "email": "hello@trithypha.dev"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/TritHypha"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -36,7 +51,7 @@
     "cli"
   ],
   "author": "TritHypha <hello@trithypha.dev>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.8.0"
