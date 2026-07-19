@@ -18,6 +18,14 @@ const FIXTURES: Record<string, string> = {
   "gate/power.fungi": "flow y\n",
   "fungi/notes.txt": "about\n",
   "gate/notes.fungi.bak": "z\n",
+  // call-site fixtures: the shape that whole-word matching silently discarded.
+  // Every REAL call site passes a variable, so `assembleWAT(w…` is the case that
+  // must match; the string-literal and empty-arg forms survived even when broken,
+  // which is exactly why the defect looked like a small under-count instead of a
+  // total one. `reassembleWAT(` is the decoy the LEFT edge must still reject.
+  "call/a.ts": 'const r = assembleWAT(cleanWat);\nconst s = assembleWAT("(module)");\n',
+  "call/b.ts": "await assembleWAT(wat);\nassembleWAT();\n",
+  "call/decoy.ts": "reassembleWAT(wat);\n",
 };
 
 async function fixtureTree(): Promise<string> {
@@ -61,6 +69,88 @@ test("word search matches whole words only (the precision claim)", async () => {
     // adds concatenate, category, CATALOG
     assert.equal(sub.length, 5);
     assert.ok(sub.length > word.length, "substring is a superset of word");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Returns the whole result, not just matches — the excluded-count is a summary field.
+async function runFull(
+  dir: string,
+  query: string,
+  opts: Partial<SearchOptions>,
+): Promise<import("../src/index.ts").SearchResult> {
+  const { graph } = await buildIndex(dir, {
+    maxFileSize: 1 << 20,
+    useGitignore: false,
+  });
+  const outcome = await search(dir, graph, query, {
+    mode: "word",
+    caseSensitive: "smart",
+    files: false,
+    limit: 1000,
+    context: 0,
+    ...opts,
+  });
+  assert.ok(!isError(outcome), "search should not error");
+  if (isError(outcome)) throw new Error("unreachable");
+  return outcome;
+}
+
+test("★ call-site search: a pattern ending in punctuation matches sites passing a VARIABLE", async () => {
+  const dir = await fixtureTree();
+  try {
+    // The field defect: the trailing word-boundary test was applied even though the
+    // pattern already ends in '(' — so it landed on the char AFTER the paren and
+    // rejected every call site passing a variable. `foo("x")` and `foo()` survived,
+    // which made a total failure look like a small under-count.
+    const hits = await run(dir, "assembleWAT(", { mode: "word" });
+    const paths = [...new Set(hits.map((m) => m.path))].sort();
+    assert.deepEqual(paths, ["call/a.ts", "call/b.ts"]);
+    // a.ts: assembleWAT(cleanWat) + assembleWAT("(module)")  b.ts: (wat) + ()
+    assert.equal(hits.length, 4);
+    // the variable-passing form is the one that used to vanish
+    assert.ok(
+      hits.some((m) => m.text.includes("assembleWAT(cleanWat)")),
+      "the variable call site must be found",
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("★ the LEFT edge still filters: `assembleWAT(` must not match `reassembleWAT(`", async () => {
+  const dir = await fixtureTree();
+  try {
+    const hits = await run(dir, "assembleWAT(", { mode: "word" });
+    assert.ok(
+      !hits.some((m) => m.path.includes("decoy")),
+      "whole-word protection on the leading edge must survive the fix",
+    );
+    // and the substring mode, which never filtered, still sees it
+    const sub = await run(dir, "assembleWAT(", { mode: "substring" });
+    assert.ok(sub.some((m) => m.path.includes("decoy")));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("★ a boundary-narrowed result reports what it discarded (never reads as absence)", async () => {
+  const dir = await fixtureTree();
+  try {
+    // "all" occurs verbatim inside "call/…" but never as a whole word. Zero hits is
+    // CORRECT here — the defect would be reporting zero without saying that files
+    // containing the pattern were thrown away.
+    const res = await runFull(dir, "all", { files: true, mode: "word" });
+    assert.equal(res.matches.length, 0);
+    assert.ok(
+      res.wordBoundaryExcluded >= 3,
+      `expected the discarded candidates to be counted, got ${res.wordBoundaryExcluded}`,
+    );
+    // a genuinely absent pattern must NOT claim exclusions
+    const absent = await runFull(dir, "zzznotpresent", { files: true, mode: "word" });
+    assert.equal(absent.matches.length, 0);
+    assert.equal(absent.wordBoundaryExcluded, 0);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

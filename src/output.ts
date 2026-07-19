@@ -125,6 +125,7 @@ export function render(
           filesMatched: result.filesMatched,
           hits: result.matches.length,
           truncated: result.truncated,
+          wordBoundaryExcluded: result.wordBoundaryExcluded,
         },
       },
       null,
@@ -145,5 +146,14 @@ export function summaryLine(result: SearchResult): string {
     `(${result.filesSearched} searched)`,
   ];
   if (result.truncated) bits.push("[truncated — raise --limit]");
+  // Never let a narrowed result read as absence. If whole-word matching threw away
+  // files that DO contain the pattern, say so and name the escape hatch — the same
+  // "no silent caps" rule the over-size skip note already follows.
+  if (result.wordBoundaryExcluded > 0) {
+    const n = result.wordBoundaryExcluded;
+    bits.push(
+      `${n} file${n === 1 ? "" : "s"} contain${n === 1 ? "s" : ""} the pattern but ${n === 1 ? "was" : "were"} excluded by whole-word matching — try -s`,
+    );
+  }
   return bits.join(" · ");
 }
