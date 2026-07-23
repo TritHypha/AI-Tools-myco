@@ -244,6 +244,16 @@ async function run(argv: string[]): Promise<number> {
   }
 }
 
+// A downstream consumer that closes the pipe early — `myco … | head`, `| less`
+// (quit before the end), a killed pager — makes stdout emit an async 'error'
+// (EPIPE) that the promise chain below cannot catch: it would crash myco with a
+// non-zero exit (255). A truncated pipe is normal use, not a failure — exit
+// cleanly. Installed before any output so no write can race ahead of it.
+process.stdout.on("error", (e: NodeJS.ErrnoException) => {
+  if (e.code === "EPIPE") process.exit(0);
+  throw e;
+});
+
 run(process.argv.slice(2))
   .then((code) => {
     process.exitCode = code;
