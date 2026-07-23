@@ -370,3 +370,52 @@ export async function search(
     wordBoundaryExcluded: excluded,
   };
 }
+
+// Search a SINGLE file directly, with NO index — used when the path argument is a
+// file, not a directory (`myco -s foo path/to/file.ts`). The graph index is
+// per-directory (it mkdir's `<root>/.myco`), so a file root previously died with
+// `ENOTDIR: not a directory, mkdir <file>`. A lone file needs no prune anyway, so
+// read-and-match it directly and reuse the same precise matcher.
+export async function searchFile(
+  absFile: string,
+  query: string,
+  opts: SearchOptions,
+): Promise<SearchOutcome> {
+  if (query === "") return { error: "empty query" };
+  if (opts.mode === "regex") {
+    const verdict = assessRegexSafety(query);
+    if (!verdict.safe) return { error: `unsafe regex refused (ReDoS guard): ${verdict.reason}` };
+  }
+  const sensitive = resolveSensitivity(query, opts.caseSensitive);
+  let matcher: RegExp;
+  try {
+    matcher = buildMatcher(query, opts.mode, sensitive);
+  } catch (e) {
+    return { error: `invalid ${opts.mode} pattern: ${(e as Error).message}` };
+  }
+  const loose = opts.mode === "word" ? buildLooseProbe(query, sensitive) : undefined;
+  const rel = path.basename(absFile);
+
+  if (opts.files) {
+    const hits = scanLine(rel, matcher).map((h) => ({
+      path: rel, line: 0, col: h.col, length: h.length, text: rel, before: [], after: [],
+    }));
+    return {
+      matches: hits.slice(0, opts.limit),
+      filesSearched: 1,
+      filesMatched: hits.length > 0 ? 1 : 0,
+      truncated: hits.length > opts.limit,
+      wordBoundaryExcluded: hits.length === 0 && loose !== undefined && loose.test(rel) ? 1 : 0,
+    };
+  }
+
+  const { hits, excludedByBoundary } = await matchFile(absFile, rel, matcher, opts.context, loose);
+  const ranked = rank(hits);
+  return {
+    matches: ranked.slice(0, opts.limit),
+    filesSearched: 1,
+    filesMatched: hits.length > 0 ? 1 : 0,
+    truncated: ranked.length > opts.limit,
+    wordBoundaryExcluded: excludedByBoundary ? 1 : 0,
+  };
+}

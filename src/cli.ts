@@ -18,8 +18,8 @@ import * as path from "node:path";
 import { buildIndex, DEFAULT_INDEX_OPTIONS } from "./ingest/indexer.ts";
 import type { IndexOptions } from "./ingest/indexer.ts";
 import { loadGraph } from "./graph/store.ts";
-import { search, isError } from "./query/search.ts";
-import type { MatchMode, SearchOptions } from "./query/search.ts";
+import { search, searchFile, isError } from "./query/search.ts";
+import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts";
 import { render, summaryLine } from "./output.ts";
 import { VERSION } from "./index.ts";
 
@@ -98,7 +98,10 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   const started = process.hrtime.bigint();
   const { stats, skippedLargePaths } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
-  process.stderr.write(
+  // Informational output → stdout. stderr is reserved for real errors (which all
+  // exit non-zero), so a consumer can treat any stderr output — or a non-zero exit —
+  // as a genuine failure, and this benign stat line can never be mistaken for one.
+  process.stdout.write(
     `indexed ${stats.files} files ` +
       `(+${stats.added} ~${stats.updated} -${stats.removed}, ` +
       `${stats.unchanged} unchanged, ${stats.skippedBinary} binary skipped, ` +
@@ -109,10 +112,10 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   // returns nothing is never mistaken for "not present" (DESIGN §8/§10).
   if (skippedLargePaths.length > 0) {
     const mib = (index.maxFileSize / (1024 * 1024)).toFixed(0);
-    process.stderr.write(
+    process.stdout.write(
       `  ${skippedLargePaths.length} file(s) exceed --max-size (${mib} MiB) — NOT searchable:\n`,
     );
-    for (const p of skippedLargePaths) process.stderr.write(`    ${p}\n`);
+    for (const p of skippedLargePaths) process.stdout.write(`    ${p}\n`);
   }
   return 0;
 }
@@ -150,33 +153,42 @@ async function cmdSearch(
   }
   const { search: sOpts, index: iOpts } = toOptions(values);
 
-  // Refresh (incremental) unless told not to, so results are never stale.
-  let graph;
-  if (values["no-refresh"]) {
-    const loaded = await loadGraph(root);
-    if (!loaded) {
-      process.stderr.write("myco: no index yet — run `myco index` or drop --no-refresh\n");
-      return 2;
-    }
-    graph = loaded.graph;
+  // A file path arg (not a directory) → search just that one file, no index. myco's
+  // index is per-directory (it mkdir's `<root>/.myco`), so a file root previously died
+  // with `ENOTDIR: not a directory, mkdir <file>`. A lone file needs no prune anyway.
+  const targetStat = await fs.stat(root).catch(() => undefined);
+  let outcome: SearchOutcome;
+  if (targetStat?.isFile()) {
+    outcome = await searchFile(root, pattern, sOpts);
   } else {
-    if ((await loadGraph(root)) === null) {
-      process.stderr.write(`myco: indexing ${path.resolve(root)} (first run)…\n`);
+    // Refresh (incremental) unless told not to, so results are never stale.
+    let graph;
+    if (values["no-refresh"]) {
+      const loaded = await loadGraph(root);
+      if (!loaded) {
+        process.stderr.write("myco: no index yet — run `myco index` or drop --no-refresh\n");
+        return 2;
+      }
+      graph = loaded.graph;
+    } else {
+      if ((await loadGraph(root)) === null) {
+        // Informational note → stdout (stderr is errors only).
+        process.stdout.write(`myco: indexing ${path.resolve(root)} (first run)…\n`);
+      }
+      const built = await buildIndex(root, iOpts);
+      graph = built.graph;
+      // Surface an over-size skip even on the search path — otherwise an oversized file
+      // silently misses and a zero-result reads as "absent" (the recurring "we keep
+      // missing things" failure). Informational → stdout: a skip is not a failure.
+      if (!values["json"] && built.skippedLargePaths.length > 0) {
+        process.stdout.write(
+          `myco: note — ${built.skippedLargePaths.length} file(s) over --max-size ` +
+            `not searched (run \`myco index\` to list them)\n`,
+        );
+      }
     }
-    const built = await buildIndex(root, iOpts);
-    graph = built.graph;
-    // Surface an over-size skip even on the search path — otherwise an oversized file
-    // silently misses and a zero-result search reads as "absent" (the recurring
-    // "we keep missing things" failure). stderr only, so JSON/piped stdout stays clean.
-    if (!values["json"] && built.skippedLargePaths.length > 0) {
-      process.stderr.write(
-        `myco: note — ${built.skippedLargePaths.length} file(s) over --max-size ` +
-          `not searched (run \`myco index\` to list them)\n`,
-      );
-    }
+    outcome = await search(root, graph, pattern, sOpts);
   }
-
-  const outcome = await search(root, graph, pattern, sOpts);
   if (isError(outcome)) {
     process.stderr.write(`myco: ${outcome.error}\n`);
     return 2;
@@ -187,7 +199,9 @@ async function cmdSearch(
     json: Boolean(values["json"]),
   });
   if (body) process.stdout.write(body + "\n");
-  if (!values["json"]) process.stderr.write(summaryLine(outcome) + "\n");
+  // Summary → stdout (informational). stderr stays empty on a successful search, so
+  // stderr-non-empty is a trustworthy failure signal at the shell/tool boundary.
+  if (!values["json"]) process.stdout.write(summaryLine(outcome) + "\n");
 
   return outcome.matches.length > 0 ? 0 : 1;
 }
