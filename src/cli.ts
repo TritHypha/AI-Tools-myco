@@ -95,6 +95,12 @@ function useColor(values: Record<string, unknown>): boolean {
 }
 
 async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
+  // Same fail-closed guard as cmdSearch: `myco index <nonexistent>` must not
+  // mkdir `<root>/.myco` at a path that doesn't exist. Create nothing, exit 2.
+  if (!(await fs.stat(root).catch(() => undefined))) {
+    process.stderr.write(`myco: path not found: ${root}\n`);
+    return 2;
+  }
   const started = process.hrtime.bigint();
   const { stats, skippedLargePaths } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
@@ -157,6 +163,16 @@ async function cmdSearch(
   // index is per-directory (it mkdir's `<root>/.myco`), so a file root previously died
   // with `ENOTDIR: not a directory, mkdir <file>`. A lone file needs no prune anyway.
   const targetStat = await fs.stat(root).catch(() => undefined);
+  if (!targetStat) {
+    // A missing (or unstattable) path must NOT fall through to the buildIndex branch:
+    // buildIndex → saveGraph() mkdir's `<root>/.myco` RECURSIVELY, which would
+    // MATERIALISE a directory tree at a path the user only queried — a read-only
+    // search with a filesystem side effect (a typo'd path becomes a stray dir, and
+    // the created dir can then be picked up by a test-runner glob → spurious failure).
+    // Fail closed: report and create nothing.
+    process.stderr.write(`myco: path not found: ${root}\n`);
+    return 2;
+  }
   let outcome: SearchOutcome;
   if (targetStat?.isFile()) {
     outcome = await searchFile(root, pattern, sOpts);
