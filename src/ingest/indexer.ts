@@ -16,6 +16,7 @@ import { walk } from "./walk.ts";
 export interface IndexOptions {
   maxFileSize: number;
   useGitignore: boolean;
+  includeVendored?: boolean; // descend into node_modules (default false; skips reported)
 }
 
 export interface IndexStats {
@@ -26,6 +27,7 @@ export interface IndexStats {
   removed: number; // dropped because they vanished
   skippedBinary: number; // detected as binary and skipped
   skippedLarge: number; // skipped for exceeding maxFileSize (reported, never silent)
+  skippedVendored: number; // vendored dirs (node_modules) pruned by default (reported, never silent)
 }
 
 export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
@@ -36,7 +38,12 @@ export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
 export async function buildIndex(
   root: string,
   opts: IndexOptions = DEFAULT_INDEX_OPTIONS,
-): Promise<{ graph: SearchGraph; stats: IndexStats; skippedLargePaths: string[] }> {
+): Promise<{
+  graph: SearchGraph;
+  stats: IndexStats;
+  skippedLargePaths: string[];
+  skippedVendoredDirs: string[];
+}> {
   const prior = await loadGraph(root);
   const graph = prior?.graph ?? new SearchGraph();
 
@@ -48,10 +55,12 @@ export async function buildIndex(
     removed: 0,
     skippedBinary: 0,
     skippedLarge: 0,
+    skippedVendored: 0,
   };
 
   const skippedLargePaths: string[] = [];
-  const metas = await walk(root, opts, skippedLargePaths);
+  const skippedVendoredDirs: string[] = [];
+  const metas = await walk(root, opts, skippedLargePaths, skippedVendoredDirs);
   const seen = new Set<string>();
 
   for (const meta of metas) {
@@ -92,7 +101,8 @@ export async function buildIndex(
   }
 
   stats.skippedLarge = skippedLargePaths.length;
+  stats.skippedVendored = skippedVendoredDirs.length;
   stats.files = graph.fileCount();
   await saveGraph(root, graph);
-  return { graph, stats, skippedLargePaths };
+  return { graph, stats, skippedLargePaths, skippedVendoredDirs };
 }

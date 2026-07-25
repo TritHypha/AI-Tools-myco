@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { buildIndex, DEFAULT_INDEX_OPTIONS } from "./ingest/indexer.ts";
 import type { IndexOptions } from "./ingest/indexer.ts";
 import { loadGraph } from "./graph/store.ts";
-import { search, searchFile, isError } from "./query/search.ts";
+import { search, searchFile, isError, detectRegexIntent } from "./query/search.ts";
 import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts";
 import { render, summaryLine } from "./output.ts";
 import { VERSION } from "./index.ts";
@@ -52,6 +52,7 @@ INDEXING
       --no-refresh    search the existing index without refreshing first
       --no-gitignore  do not honour .gitignore
       --max-size N    skip files larger than N megabytes (default 5)
+      --vendored      descend into vendored deps (node_modules; skipped + reported by default)
 
 Exit codes: 0 = matches, 1 = no matches, 2 = error.`;
 
@@ -84,6 +85,7 @@ function toOptions(values: Record<string, unknown>): {
         ? Math.floor(maxMb * 1024 * 1024)
         : DEFAULT_INDEX_OPTIONS.maxFileSize,
       useGitignore: !values["no-gitignore"],
+      includeVendored: Boolean(values["vendored"]),
     },
   };
 }
@@ -102,7 +104,7 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
     return 2;
   }
   const started = process.hrtime.bigint();
-  const { stats, skippedLargePaths } = await buildIndex(root, index);
+  const { stats, skippedLargePaths, skippedVendoredDirs } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   // Informational output → stdout. stderr is reserved for real errors (which all
   // exit non-zero), so a consumer can treat any stderr output — or a non-zero exit —
@@ -122,6 +124,14 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
       `  ${skippedLargePaths.length} file(s) exceed --max-size (${mib} MiB) — NOT searchable:\n`,
     );
     for (const p of skippedLargePaths) process.stdout.write(`    ${p}\n`);
+  }
+  // Same no-silent-caps rule for vendored trees: name the pruned dirs and the
+  // escape hatch, so a miss inside node_modules can never read as absence.
+  if (skippedVendoredDirs.length > 0) {
+    process.stdout.write(
+      `  ${skippedVendoredDirs.length} vendored dir(s) skipped (NOT searchable; pass --vendored to include):\n`,
+    );
+    for (const p of skippedVendoredDirs) process.stdout.write(`    ${p}\n`);
   }
   return 0;
 }
@@ -158,6 +168,17 @@ async function cmdSearch(
     return 2;
   }
   const { search: sOpts, index: iOpts } = toOptions(values);
+
+  // A regex-shaped pattern (`a|b`, `\(`, `.*`, anchors) outside regex mode runs as a
+  // LITERAL — correct, but two zero-trust probes were misled by exactly this in one
+  // day (2026-07-25): the literal miss read as "absent". Say so up front; stdout,
+  // informational — the search still runs, semantics unchanged (fail-closed = keep
+  // behavior, surface the trap).
+  if (!values["json"] && sOpts.mode !== "regex" && detectRegexIntent(pattern)) {
+    process.stdout.write(
+      `myco: note — pattern looks like a regex but ran as a LITERAL ${sOpts.mode} match; pass -e for regex\n`,
+    );
+  }
 
   // A file path arg (not a directory) → search just that one file, no index. myco's
   // index is per-directory (it mkdir's `<root>/.myco`), so a file root previously died
@@ -202,6 +223,14 @@ async function cmdSearch(
             `not searched (run \`myco index\` to list them)\n`,
         );
       }
+      // Vendored trees pruned on the search path get the same visibility as the
+      // over-size skip — a node_modules miss must never read as absence.
+      if (!values["json"] && built.skippedVendoredDirs.length > 0) {
+        process.stdout.write(
+          `myco: note — ${built.skippedVendoredDirs.length} vendored dir(s) (node_modules) ` +
+            `not searched (pass --vendored to include)\n`,
+        );
+      }
     }
     outcome = await search(root, graph, pattern, sOpts);
   }
@@ -239,6 +268,7 @@ async function run(argv: string[]): Promise<number> {
       "no-gitignore": { type: "boolean" },
       "no-refresh": { type: "boolean" },
       "max-size": { type: "string" },
+      vendored: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },

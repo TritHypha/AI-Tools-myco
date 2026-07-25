@@ -10,7 +10,30 @@ have fixed a case where the tool returned a narrower answer than the truth
 without saying so.** Each one is listed as a fix, but the recurring lesson is
 that the silence was the defect, not the narrowing.
 
-## [Unreleased]
+## [0.1.4]
+
+Two more silent-narrowing fixes, found the same day by two independent sessions —
+this file's standing theme, again: the narrowing was defensible, the silence was not.
+
+### Added
+
+- **`node_modules` is pruned by default — loudly — with `--vendored` to include it.**
+  At an un-gitted root (a hub directory of many repos) nothing ignores vendored
+  trees, so a hub-level index drowned in them. They are now skipped like build
+  infrastructure, but unlike `.git`/`.myco` the skip is REPORTED: `myco index`
+  names each pruned dir, a search prints a one-line note, and `--vendored`
+  restores full coverage. A vendored miss can no longer read as absence.
+- **Regex-intent warning.** A pattern carrying strong regex signals (`a|b`, `\(`,
+  `\d`, `.*`, `^`/`$` anchors) outside `-e` runs as a LITERAL — correct, but it
+  misled two verification probes in one day (a literal `codePoint\(\)` missed a
+  file that contains `codePoint()`). myco now says so up front:
+  `pattern looks like a regex but ran as a LITERAL word match; pass -e for regex`.
+  Deliberately narrow — `foo(`, `.fungi`, `c++` stay quiet.
+- **`(0 searched)` now explains itself.** Phase-1 candidate pruning AND-intersects
+  the query's word terms; when no file contains them all, zero files are opened.
+  The summary now appends `index pruned all candidates: no file contains ALL the
+  query's words — miss ≠ absent (regex? use -e)`, and the JSON summary carries
+  `prunedToZero`.
 
 ### Fixed
 

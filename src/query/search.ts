@@ -48,6 +48,12 @@ export interface SearchResult {
   // never be mistaken for absence — the "no silent caps" contract (DESIGN §8/§10)
   // applied to the matcher itself, not just to the walker's size cap.
   wordBoundaryExcluded: number;
+  // Content search only: phase-1 pruning intersected the query's word-terms and NO
+  // file contained all of them, so zero files were even opened. Without this flag
+  // the summary's "(0 searched)" is cryptic — and for a regex-intent pattern run
+  // literally (e.g. `a|b` in word mode) it silently reads as absence (field report
+  // 2026-07-25: two sessions independently misled in one day).
+  prunedToZero: boolean;
 }
 
 export interface SearchError {
@@ -62,6 +68,24 @@ export function isError(o: SearchOutcome): o is SearchError {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Does a NON-regex-mode query look like it was MEANT as a regex? Word/substring
+// mode escapes metacharacters and runs the pattern literally — correct, but a user
+// typing `fromCodePoint|fromCharCode` or `codePoint\(\)` gets a literal miss with
+// no hint (field report 2026-07-25: a probe nearly logged a false "absent" against
+// a string that WAS present). Deliberately NARROW — only the strong signals:
+//   alternation `|` · an escape sequence `\w \d \b \s \( …` · `.*`/`.+` · a
+//   leading `^` or trailing `$` anchor.
+// A bare `(`, `.`, or `+` does NOT fire: `foo(`, `.fungi`, and `c++` are common
+// honest literal queries (the per-edge boundary comment above exists for exactly
+// the `foo(` case), and a note that cries wolf trains users to ignore it.
+export function detectRegexIntent(query: string): boolean {
+  if (query.includes("|")) return true;
+  if (/\\[wdbsWDBS(){}[\]+*?.]/.test(query)) return true;
+  if (/\.[*+]/.test(query)) return true;
+  if (query.startsWith("^") || query.endsWith("$")) return true;
+  return false;
 }
 
 function resolveSensitivity(query: string, opt: boolean | "smart"): boolean {
@@ -276,6 +300,7 @@ function searchNames(
     filesMatched: matched,
     truncated: ranked.length > limit,
     wordBoundaryExcluded: excluded,
+    prunedToZero: false, // name search scans every indexed path — nothing is pruned
   };
 }
 
@@ -368,6 +393,9 @@ export async function search(
     filesMatched: filesMatched.size,
     truncated: ranked.length > opts.limit || budgetExceeded,
     wordBoundaryExcluded: excluded,
+    // The index pruned to an EMPTY candidate set (multi-term AND with no common
+    // file) — surfaced so "(0 searched)" explains itself instead of reading as absence.
+    prunedToZero: ids !== null && records.length === 0,
   };
 }
 
@@ -406,6 +434,7 @@ export async function searchFile(
       filesMatched: hits.length > 0 ? 1 : 0,
       truncated: hits.length > opts.limit,
       wordBoundaryExcluded: hits.length === 0 && loose !== undefined && loose.test(rel) ? 1 : 0,
+      prunedToZero: false, // single-file search has no index to prune
     };
   }
 
@@ -417,5 +446,6 @@ export async function searchFile(
     filesMatched: hits.length > 0 ? 1 : 0,
     truncated: ranked.length > opts.limit,
     wordBoundaryExcluded: excludedByBoundary ? 1 : 0,
+    prunedToZero: false, // single-file search has no index to prune
   };
 }

@@ -19,7 +19,7 @@ export { countTerms } from "./ingest/tokenize.ts";
 export { walk } from "./ingest/walk.ts";
 export type { FileMeta, WalkOptions } from "./ingest/walk.ts";
 
-export { search, isError } from "./query/search.ts";
+export { search, isError, detectRegexIntent } from "./query/search.ts";
 export type {
   MatchMode,
   Match,
@@ -29,4 +29,4 @@ export type {
   SearchOutcome,
 } from "./query/search.ts";
 
-export const VERSION = "0.1.3";
+export const VERSION = "0.1.4";

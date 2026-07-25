@@ -33,6 +33,11 @@ export interface FileMeta {
 export interface WalkOptions {
   maxFileSize: number; // bytes; larger files are skipped
   useGitignore: boolean;
+  // Descend into vendored-dependency dirs (node_modules). Default false: at an
+  // un-gitted root nothing ignores them, so a hub-level index drowns in vendored
+  // trees (field report 2026-07-25). Skips are REPORTED via `skippedVendored`,
+  // never silent — the "no silent caps" contract (DESIGN §8/§10).
+  includeVendored?: boolean;
 }
 
 interface Rule {
@@ -45,6 +50,11 @@ interface Rule {
 
 // Directories we never descend into, regardless of ignore files.
 const ALWAYS_SKIP = new Set([".git", ".myco"]);
+
+// Vendored-dependency dirs: skipped BY DEFAULT (overridable via includeVendored),
+// and always counted so the skip is visible. Unlike ALWAYS_SKIP (infrastructure,
+// silent), a vendored skip is a coverage cap the user must be able to see and lift.
+const VENDORED_SKIP = new Set(["node_modules"]);
 
 function globToRegExp(glob: string): RegExp {
   let re = "";
@@ -133,6 +143,7 @@ export async function walk(
   root: string,
   opts: WalkOptions,
   skippedLarge?: string[], // out: paths skipped for exceeding maxFileSize — reported, never silent
+  skippedVendored?: string[], // out: vendored dirs (node_modules) pruned by default — reported, never silent
 ): Promise<FileMeta[]> {
   const out: FileMeta[] = [];
 
@@ -160,6 +171,10 @@ export async function walk(
       if (ent.isSymbolicLink()) continue;
       if (ent.isDirectory()) {
         if (ALWAYS_SKIP.has(ent.name)) continue;
+        if (VENDORED_SKIP.has(ent.name) && !opts.includeVendored) {
+          skippedVendored?.push(rel); // a pruned vendored tree must be visible, not silent
+          continue;
+        }
         if (isIgnored(rules, rel, true)) continue;
         await recur(path.join(absDir, ent.name), rel, rules);
       } else if (ent.isFile()) {

@@ -126,6 +126,7 @@ export function render(
           hits: result.matches.length,
           truncated: result.truncated,
           wordBoundaryExcluded: result.wordBoundaryExcluded,
+          prunedToZero: result.prunedToZero,
         },
       },
       null,
@@ -154,6 +155,12 @@ export function summaryLine(result: SearchResult): string {
     bits.push(
       `${n} file${n === 1 ? "" : "s"} contain${n === 1 ? "s" : ""} the pattern but ${n === 1 ? "was" : "were"} excluded by whole-word matching — try -s`,
     );
+  }
+  // "(0 searched)" must explain itself: the index AND-intersects the query's word
+  // terms, so a multi-word (or regex-meant-as-literal) pattern can prune every
+  // candidate. Cryptic zero reads as absence — the exact misread this line closes.
+  if (result.prunedToZero) {
+    bits.push("index pruned all candidates: no file contains ALL the query's words — miss ≠ absent (regex? use -e)");
   }
   return bits.join(" · ");
 }

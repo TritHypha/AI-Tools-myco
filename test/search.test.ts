@@ -4,8 +4,9 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { buildIndex, search, isError } from "../src/index.ts";
+import { buildIndex, search, isError, detectRegexIntent } from "../src/index.ts";
 import type { Match, SearchOptions } from "../src/index.ts";
+import { summaryLine } from "../src/output.ts";
 
 const FIXTURES: Record<string, string> = {
   "a.txt": "the cat sat\nconcatenate the category\n",
@@ -225,5 +226,46 @@ test("filename search: a leading-dot query is an extension match (the .fungi fix
     assert.equal(content.length, 0);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prunedToZero: an AND-missed multi-term query says WHY zero files were searched", async () => {
+  const dir = await fixtureTree();
+  try {
+    const { graph } = await buildIndex(dir, { maxFileSize: 1 << 20, useGitignore: false });
+    const base: SearchOptions = { mode: "word", caseSensitive: "smart", files: false, limit: 100, context: 0 };
+
+    // A regex-meant-as-literal alternation: terms {cat, graph} co-occur in NO file,
+    // so phase 1 prunes every candidate — the exact field misread (2026-07-25).
+    const pruned = await search(dir, graph, "cat|graph", base);
+    assert.ok(!isError(pruned));
+    if (!isError(pruned)) {
+      assert.equal(pruned.filesSearched, 0, "nothing opened — the index pruned to zero");
+      assert.equal(pruned.prunedToZero, true, "the pruning is SURFACED, not silent");
+      // The summary must explain the zero rather than leave it cryptic.
+      assert.match(summaryLine(pruned), /index pruned all candidates/);
+    }
+
+    // Control: a matching query is NOT flagged (a null result must stay meaningful).
+    const hit = await search(dir, graph, "cat", base);
+    assert.ok(!isError(hit));
+    if (!isError(hit)) {
+      assert.ok(hit.filesSearched > 0);
+      assert.equal(hit.prunedToZero, false, "no false positive on an ordinary hit");
+      assert.doesNotMatch(summaryLine(hit), /index pruned/);
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("detectRegexIntent: fires on the strong regex signals, quiet on honest literals", () => {
+  // MUST fire — the shapes that misled two zero-trust probes in one day (2026-07-25):
+  for (const q of ["fromCodePoint|fromCharCode", "codePoint\\(\\)", "\\d+", "log.*Error", "^import", "end$"]) {
+    assert.equal(detectRegexIntent(q), true, `should fire: ${q}`);
+  }
+  // MUST stay quiet — common honest literal queries (a note that cries wolf is ignored):
+  for (const q of ["foo(", "assembleWAT(c", ".fungi", "c++", "plain", "a.b"]) {
+    assert.equal(detectRegexIntent(q), false, `should stay quiet: ${q}`);
   }
 });

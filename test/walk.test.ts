@@ -133,3 +133,48 @@ test("walk leaves the skip-list empty when nothing exceeds the cap", async () =>
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("walk skips node_modules by default, REPORTS the skip, and --vendored includes it", async () => {
+  const dir = await tmpTree({
+    "app.ts": "keep",
+    "node_modules/dep/index.js": "vendored",
+    "node_modules/dep2/lib/x.js": "vendored",
+    "sub/node_modules/dep3/y.js": "vendored nested",
+    "sub/own.ts": "keep",
+  });
+  try {
+    // Default: vendored trees pruned, each pruned dir REPORTED (no silent caps).
+    const skippedVendored: string[] = [];
+    const metas = await walk(
+      dir,
+      { maxFileSize: 1 << 20, useGitignore: false },
+      undefined,
+      skippedVendored,
+    );
+    const rels = new Set(metas.map((m) => m.relPath));
+    assert.ok(rels.has("app.ts"));
+    assert.ok(rels.has("sub/own.ts"));
+    assert.ok(!rels.has("node_modules/dep/index.js"), "root node_modules pruned by default");
+    assert.ok(!rels.has("sub/node_modules/dep3/y.js"), "nested node_modules pruned too");
+    assert.deepEqual(
+      skippedVendored.sort(),
+      ["node_modules", "sub/node_modules"],
+      "every pruned vendored dir is reported — the skip is visible, not silent",
+    );
+
+    // Escape hatch: includeVendored restores full coverage and reports nothing.
+    const none: string[] = [];
+    const all = await walk(
+      dir,
+      { maxFileSize: 1 << 20, useGitignore: false, includeVendored: true },
+      undefined,
+      none,
+    );
+    const allRels = new Set(all.map((m) => m.relPath));
+    assert.ok(allRels.has("node_modules/dep/index.js"), "--vendored includes the tree");
+    assert.ok(allRels.has("sub/node_modules/dep3/y.js"));
+    assert.deepEqual(none, [], "nothing reported skipped when vendored dirs are included");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
