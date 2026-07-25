@@ -67,6 +67,12 @@ function parseIgnore(text: string, base: string): Rule[] {
     const dirOnly = body.endsWith("/");
     if (dirOnly) body = body.slice(0, -1);
     if (body.startsWith("/")) body = body.slice(1);
+    // A leading `**/` means "at any depth" — strip it so the remainder matches by
+    // basename (git's very common `**/build/`, `**/.fungi-cache/`, `**/node_modules/`
+    // idiom). This is the one `**` form worth honouring; deeper mid-path `**` stays
+    // unsupported (documented) — but silently missing `**/x` was indexing build caches
+    // a correct .gitignore already excluded (owner 2026-07-25, the .fungi-cache case).
+    if (body.startsWith("**/")) body = body.slice(3);
     if (body === "") continue;
     const basename = !body.includes("/");
     rules.push({ re: globToRegExp(body), dirOnly, negate, basename, base });

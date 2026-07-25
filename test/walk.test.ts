@@ -81,6 +81,32 @@ test("walk honours NESTED .gitignore, scoped to its own subtree (the dss-host /t
   }
 });
 
+test("walk honours a leading `**/` ignore rule as match-at-any-depth", async () => {
+  const dir = await tmpTree({
+    "keep.txt": "keep",
+    "pkg/src/main.ts": "keep",
+    "pkg/build/.fungi-cache/x.egraph.json": "drop", // nested build cache
+    "deep/a/b/build/.fungi-cache/y.egraph.json": "drop", // deeper still
+    ".gitignore": "**/.fungi-cache/\n",
+  });
+  try {
+    const rels = new Set(
+      (await walk(dir, { maxFileSize: 1 << 20, useGitignore: true })).map((m) => m.relPath),
+    );
+    assert.ok(rels.has("keep.txt") && rels.has("pkg/src/main.ts"), "real source is kept");
+    assert.ok(
+      !rels.has("pkg/build/.fungi-cache/x.egraph.json"),
+      "`**/.fungi-cache/` prunes a nested build cache (previously indexed — git honoured it, myco did not)",
+    );
+    assert.ok(
+      !rels.has("deep/a/b/build/.fungi-cache/y.egraph.json"),
+      "`**/` matches at ANY depth, not just one segment",
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("walk skips files over the size cap AND reports them (no silent drop)", async () => {
   const dir = await tmpTree({ "small.txt": "x", "big.txt": "y".repeat(1000) });
   try {
