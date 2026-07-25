@@ -14,6 +14,19 @@ that the silence was the defect, not the narrowing.
 
 ### Fixed
 
+- **Nested `.gitignore` / `.mycoignore` files are now honoured, scoped to their own
+  subtree.** Previously only the root-level ignore file was read, so a subproject
+  that ignored its own build output in *its own* `.gitignore` was silently
+  overridden. On a real tree a Rust subproject's `dss-host/.gitignore` `/target`
+  was ignored and its cargo `target/` incremental-compilation cache — tens of
+  thousands of `.bin` artefacts — was indexed, bloating both the on-disk index and
+  the pre-search incremental refresh until a whole-tree search timed out. Each
+  directory's own ignore file is now loaded as the walk descends and applied only
+  to paths beneath it (a rule from `sub/.gitignore` cannot affect a sibling of
+  `sub/`). Measured on that tree: **28k files → 4,059**, **index 361 MB → 10.7 MB**,
+  **index/refresh 23.6s → 3.8s**. The recurring lesson holds — the silent scope
+  violation (indexing what the project said not to) was the defect, not the size.
+
 - **Whole-word matching no longer discards every call site of a pattern ending in
   punctuation.** The word-boundary lookaround was applied at *both* edges
   unconditionally, including where the pattern's own edge character was already a

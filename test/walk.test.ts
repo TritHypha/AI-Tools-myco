@@ -38,6 +38,49 @@ test("walk honours .mycoignore basename globs and directory rules", async () => 
   }
 });
 
+test("walk honours NESTED .gitignore, scoped to its own subtree (the dss-host /target class)", async () => {
+  const dir = await tmpTree({
+    // a subproject with its OWN .gitignore ignoring its build output
+    "sub/.gitignore": "/target\n*.tmp\n",
+    "sub/keep.rs": "keep",
+    "sub/target/debug/artifact.bin": "drop", // ignored by sub/.gitignore `/target`
+    "sub/scratch.tmp": "drop", // ignored by sub/.gitignore `*.tmp`
+    // a SIBLING with the same-named dir but NO gitignore — must NOT be affected (scoping)
+    "other/target/keep.bin": "keep",
+    "other/notes.tmp": "keep",
+    "root.txt": "keep",
+  });
+  try {
+    const metas = await walk(dir, { maxFileSize: 1 << 20, useGitignore: true });
+    const rels = new Set(metas.map((m) => m.relPath));
+    // nested .gitignore is honoured within its subtree
+    assert.ok(rels.has("sub/keep.rs"), "a non-ignored file in the subproject is kept");
+    assert.ok(
+      !rels.has("sub/target/debug/artifact.bin"),
+      "sub/.gitignore `/target` prunes the build tree (the 28k-file timeout fix)",
+    );
+    assert.ok(!rels.has("sub/scratch.tmp"), "sub/.gitignore `*.tmp` is honoured");
+    // scoping: the nested rule must NOT leak to a sibling subtree
+    assert.ok(
+      rels.has("other/target/keep.bin"),
+      "a sibling 'target' with no .gitignore is NOT ignored by sub's rule",
+    );
+    assert.ok(rels.has("other/notes.tmp"), "a sibling '*.tmp' is NOT ignored by sub's rule");
+    assert.ok(rels.has("root.txt"));
+    // non-vacuity control: with gitignore OFF, the "ignored" files ARE walked — so the
+    // exclusions above are a real effect of reading the nested file, not an empty tree.
+    const relsNoGi = new Set(
+      (await walk(dir, { maxFileSize: 1 << 20, useGitignore: false })).map((m) => m.relPath),
+    );
+    assert.ok(
+      relsNoGi.has("sub/target/debug/artifact.bin"),
+      "control: with useGitignore:false the build artifact IS walked (non-vacuous)",
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("walk skips files over the size cap AND reports them (no silent drop)", async () => {
   const dir = await tmpTree({ "small.txt": "x", "big.txt": "y".repeat(1000) });
   try {
