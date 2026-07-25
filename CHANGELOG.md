@@ -14,6 +14,14 @@ that the silence was the defect, not the narrowing.
 
 ### Fixed
 
+- **A leading `**/` in an ignore rule now matches at any depth.** myco's glob turned
+  each `*` into `[^/]*`, so `**` collapsed to a single path segment and git's very
+  common `**/build/`, `**/.fungi-cache/`, `**/node_modules/` idiom was silently
+  unmatched — a nested build cache that a *correct* `.gitignore` already excluded was
+  still indexed (git honoured it; myco did not). A leading `**/` is now stripped so the
+  remainder matches by basename at any depth. Deeper mid-path `**` remains unsupported
+  (documented). Companion to the nested-`.gitignore` fix below.
+
 - **Nested `.gitignore` / `.mycoignore` files are now honoured, scoped to their own
   subtree.** Previously only the root-level ignore file was read, so a subproject
   that ignored its own build output in *its own* `.gitignore` was silently
