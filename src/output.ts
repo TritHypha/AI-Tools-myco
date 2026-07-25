@@ -127,6 +127,8 @@ export function render(
           truncated: result.truncated,
           wordBoundaryExcluded: result.wordBoundaryExcluded,
           prunedToZero: result.prunedToZero,
+          pathFilterExcluded: result.pathFilterExcluded,
+          pathFilterMatchedNothing: result.pathFilterMatchedNothing,
         },
       },
       null,
@@ -161,6 +163,19 @@ export function summaryLine(result: SearchResult): string {
   // candidate. Cryptic zero reads as absence — the exact misread this line closes.
   if (result.prunedToZero) {
     bits.push("index pruned all candidates: no file contains ALL the query's words — miss ≠ absent (regex? use -e)");
+  }
+  // A scope the user asked for is still a scope. Report what it removed, so a
+  // narrowed count is never read as a tree-wide one.
+  if (result.pathFilterExcluded > 0) {
+    const n = result.pathFilterExcluded;
+    bits.push(`${n} candidate${n === 1 ? "" : "s"} outside --in (not searched)`);
+  }
+  // The dangerous case, and the reason this flag exists separately from the count
+  // above: the filter excluded the ENTIRE index, so every possible result was
+  // removed before matching and the zero below means "you scoped to nowhere", not
+  // "it is not here". Those are opposite conclusions from identical output.
+  if (result.pathFilterMatchedNothing) {
+    bits.push("⚠ --in matched NO indexed path — the scope is empty, so this zero says nothing about the tree (check the glob; paths are root-relative)");
   }
   return bits.join(" · ");
 }

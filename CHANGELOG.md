@@ -10,6 +10,55 @@ have fixed a case where the tool returned a narrower answer than the truth
 without saying so.** Each one is listed as a fix, but the recurring lesson is
 that the silence was the defect, not the narrowing.
 
+## [0.2.0]
+
+The first release that adds a narrowing on purpose — and therefore the clearest
+test of this file's standing theme. Every previous entry removed a silence around a
+narrowing myco chose for you. `--in` lets you choose one yourself, which does not
+make the silence any less dangerous: a mistyped glob excludes the entire index and
+returns `0 hits`, exit 1 — byte-identical to a genuine absence, and now with the
+user's own confidence behind it. So the reporting shipped with the feature, not
+after it.
+
+### Added
+
+- **`--in <glob>` scopes a search to part of the tree**, repeatable (patterns OR
+  together). Previously the only way to scope was to point myco at a subtree as its
+  ROOT, which built a second index there (`<subtree>/.myco`) that then drifted from
+  the first. Field report 2026-07-25: a session wanted "does this token appear
+  anywhere under `packages-galerina/**/src`" and had no way to ask.
+  - A metacharacter-free pattern is a **segment-aware prefix**, not a string prefix:
+    `--in src` matches `src/a.ts` and never `srcfoo/a.ts`. The boundary is the `/`,
+    because `packages-galerina` and `packages-galerina-enterprise` are different
+    projects and a raw prefix would silently merge them.
+  - Globs: `*` within a segment · `**` across segments (matching **zero** segments
+    too, so `packages/**/src` finds `packages/src/x.ts`) · `?` one non-separator.
+  - Deliberately NOT the ignore-file glob compiler in `walk.ts`: extending that
+    would change ignore semantics for every rule in every `.gitignore` in the tree,
+    a far larger blast radius than this feature earns.
+- **The scope reports itself, both ways.** `pathFilterExcluded` counts the
+  candidates removed and appears in the summary; `pathFilterMatchedNothing` fires
+  when the glob matches **no indexed path at all** and says outright that the zero
+  "says nothing about the tree". The two are separate on purpose — *"your query
+  found nothing in a valid scope"* and *"your scope contains nothing"* are opposite
+  conclusions from identical output, and only the second is a broken query.
+
+### Fixed
+
+- **`prunedToZero` no longer blames the index for the filter's work.** It is now
+  measured before scoping, so an empty candidate set caused by `--in` is not
+  reported as "no file contains all the query's words" — which would have sent the
+  reader to fix a query that was already correct.
+
+### Changed
+
+- An unusable `--in` (empty, or an invalid pattern) is now an **error, exit 2**,
+  never a silently-absent filter. Falling back to searching everything is the worst
+  option available: the user believes they scoped, and the extra hits arrive looking
+  like evidence.
+- `--in` combined with a single-FILE target is refused rather than ignored — the
+  flag scopes a tree, so against one named file it can only be a mistake.
+
 ## [0.1.4]
 
 Two more silent-narrowing fixes, found the same day by two independent sessions —

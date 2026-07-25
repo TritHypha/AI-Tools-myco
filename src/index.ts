@@ -29,4 +29,10 @@ export type {
   SearchOutcome,
 } from "./query/search.ts";
 
-export const VERSION = "0.1.4";
+// Scoping (`--in`). Exported because the CLI is meant to be a thin layer over this
+// surface — a flag that exists only in cli.ts would make that claim false, and a
+// programmatic consumer would have to re-implement the glob rules to match.
+export { buildPathFilter, applyPathFilter } from "./query/path-filter.ts";
+export type { PathFilter } from "./query/path-filter.ts";
+
+export const VERSION = "0.2.0";

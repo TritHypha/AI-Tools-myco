@@ -120,6 +120,7 @@ myco status [path]           show index statistics
 | `-S, --case-sensitive` | force case-sensitive |
 | `-C, --context N` | show N lines of context |
 | `-n, --limit N` | max results (default 200) |
+| `--in <glob>` | search only under this path; repeatable. A plain path means "and everything under it" (`--in src` never matches `srcfoo/`); `*` within a segment, `**` across, `?` one char. Excluded candidates are counted in the summary, and a glob matching nothing is called out — a scoped zero must never read as a tree-wide absence. |
 | `--json` | machine-readable output |
 | `--no-color` | disable ANSI colour |
 | `--no-refresh` | search the existing index without refreshing |

@@ -15,6 +15,7 @@ import * as path from "node:path";
 
 import type { FileId, SearchGraph } from "../graph/model.ts";
 import { foldCase, hasUpper, wordScanner } from "../util/normalize.ts";
+import { applyPathFilter, type PathFilter } from "./path-filter.ts";
 import { assessRegexSafety, MAX_REGEX_LINE_LEN, SEARCH_TIME_BUDGET_MS } from "./regex-guard.ts";
 
 export type MatchMode = "word" | "substring" | "regex";
@@ -26,6 +27,9 @@ export interface SearchOptions {
   files: boolean; // search file paths instead of file contents
   limit: number;
   context: number; // lines of context on each side (content search only)
+  // Restrict the search to part of the tree (`--in`). A user-requested coverage
+  // cap, so the result reports what it removed — see pathFilterExcluded below.
+  pathFilter?: PathFilter;
 }
 
 export interface Match {
@@ -54,6 +58,16 @@ export interface SearchResult {
   // literally (e.g. `a|b` in word mode) it silently reads as absence (field report
   // 2026-07-25: two sessions independently misled in one day).
   prunedToZero: boolean;
+  // `--in` only: how many candidate files the path filter removed before phase 2.
+  // A cap the user asked for is still a cap — it is reported for the same reason
+  // the over-size skip is (DESIGN §8/§10).
+  pathFilterExcluded: number;
+  // `--in` only: the filter matched NOTHING anywhere in the index. Almost always a
+  // mistyped or wrongly-rooted glob, and it is the dangerous case — every result is
+  // excluded, so the search returns a confident zero that looks exactly like a real
+  // absence. Tested against the WHOLE index, not just this query's candidates: a
+  // query that legitimately finds nothing in a valid scope must NOT raise this.
+  pathFilterMatchedNothing: boolean;
 }
 
 export interface SearchError {
@@ -263,11 +277,13 @@ function searchNames(
   matcher: RegExp,
   limit: number,
   loose?: RegExp,
+  pathFilter?: PathFilter,
 ): SearchResult {
   const matches: Match[] = [];
   let searched = 0;
   let excluded = 0;
-  for (const rec of graph.files()) {
+  const { kept, excluded: filtered } = applyPathFilter([...graph.files()], pathFilter);
+  for (const rec of kept) {
     searched++;
     const nameHits = scanLine(rec.path, matcher);
     if (nameHits.length === 0) {
@@ -301,6 +317,10 @@ function searchNames(
     truncated: ranked.length > limit,
     wordBoundaryExcluded: excluded,
     prunedToZero: false, // name search scans every indexed path — nothing is pruned
+    pathFilterExcluded: filtered,
+    // Name search already covers the whole index, so "kept nothing" IS "matched
+    // nothing anywhere" — no second pass needed to tell the two apart.
+    pathFilterMatchedNothing: pathFilter !== undefined && kept.length === 0,
   };
 }
 
@@ -346,13 +366,24 @@ export async function search(
   const loose =
     opts.mode === "word" ? buildLooseProbe(query, sensitive) : undefined;
 
-  if (opts.files) return searchNames(graph, matcher, opts.limit, loose);
+  if (opts.files) return searchNames(graph, matcher, opts.limit, loose, opts.pathFilter);
 
   const ids = candidates(graph, queryTerms(query), opts.mode);
-  const records =
+  const unfiltered =
     ids === null
       ? [...graph.files()]
       : ids.map((id) => graph.file(id)).filter((r) => r !== undefined);
+
+  // Scope AFTER the prune and BEFORE phase 2, so the filter also saves file reads.
+  const { kept: records, excluded: pathExcluded } = applyPathFilter(unfiltered, opts.pathFilter);
+  // Does the filter match anything AT ALL in the index? Answered against the whole
+  // index rather than this query's candidates, because the two failures need
+  // different words: "nothing here matches your query" is a normal result, while
+  // "your --in matches no file in this tree" is a broken query dressed as one.
+  // Costs one string test per indexed path, and only when --in was passed.
+  const filterMatchedNothing =
+    opts.pathFilter !== undefined &&
+    ![...graph.files()].some((r) => opts.pathFilter?.test(r.path));
 
   const all: Match[] = [];
   const filesMatched = new Set<string>();
@@ -395,7 +426,13 @@ export async function search(
     wordBoundaryExcluded: excluded,
     // The index pruned to an EMPTY candidate set (multi-term AND with no common
     // file) — surfaced so "(0 searched)" explains itself instead of reading as absence.
-    prunedToZero: ids !== null && records.length === 0,
+    // Measured on `unfiltered`, not `records`: with --in in play, an empty candidate
+    // set caused by the FILTER must not be reported as the INDEX having pruned it,
+    // or the summary blames the wrong mechanism and sends the user to fix a query
+    // that was fine.
+    prunedToZero: ids !== null && unfiltered.length === 0,
+    pathFilterExcluded: pathExcluded,
+    pathFilterMatchedNothing: filterMatchedNothing,
   };
 }
 
@@ -435,6 +472,10 @@ export async function searchFile(
       truncated: hits.length > opts.limit,
       wordBoundaryExcluded: hits.length === 0 && loose !== undefined && loose.test(rel) ? 1 : 0,
       prunedToZero: false, // single-file search has no index to prune
+      // --in scopes a tree; an explicit single-file target IS the scope. The CLI
+      // refuses the combination rather than silently ignoring the flag.
+      pathFilterExcluded: 0,
+      pathFilterMatchedNothing: false,
     };
   }
 
@@ -447,5 +488,7 @@ export async function searchFile(
     truncated: ranked.length > opts.limit,
     wordBoundaryExcluded: excludedByBoundary ? 1 : 0,
     prunedToZero: false, // single-file search has no index to prune
+    pathFilterExcluded: 0,
+    pathFilterMatchedNothing: false,
   };
 }

@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { buildIndex, DEFAULT_INDEX_OPTIONS } from "./ingest/indexer.ts";
 import type { IndexOptions } from "./ingest/indexer.ts";
 import { loadGraph } from "./graph/store.ts";
+import { buildPathFilter } from "./query/path-filter.ts";
 import { search, searchFile, isError, detectRegexIntent } from "./query/search.ts";
 import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts";
 import { render, summaryLine } from "./output.ts";
@@ -41,6 +42,15 @@ CASE
   (default)             smart-case: case-sensitive only if the pattern has a capital
   -i, --ignore-case     force case-insensitive
   -S, --case-sensitive  force case-sensitive
+
+SCOPE
+      --in <glob>   search only under this path; repeatable (patterns OR together).
+                    Root-relative and POSIX. A plain path means "and everything
+                    under it" (--in src matches src/a.ts, never srcfoo/a.ts).
+                    Globs: * within a segment · ** across segments · ? one char.
+                    Excluded candidates are COUNTED in the summary, and a glob that
+                    matches nothing is called out — a scoped zero must never read
+                    as a tree-wide absence.
 
 OUTPUT
   -C, --context N   show N lines of context (content search)
@@ -169,6 +179,20 @@ async function cmdSearch(
   }
   const { search: sOpts, index: iOpts } = toOptions(values);
 
+  // --in is a coverage cap. If it cannot be honoured exactly as written, STOP —
+  // never fall back to searching everything. A filter that silently widens is the
+  // worst outcome available here: the user believes they scoped, the tool returns
+  // tree-wide hits, and the extra results look like evidence rather than noise.
+  const inPatterns = values["in"] as string[] | undefined;
+  if (inPatterns !== undefined) {
+    const built = buildPathFilter(inPatterns);
+    if (typeof built === "string") {
+      process.stderr.write(`myco: ${built}\n`);
+      return 2;
+    }
+    sOpts.pathFilter = built;
+  }
+
   // A regex-shaped pattern (`a|b`, `\(`, `.*`, anchors) outside regex mode runs as a
   // LITERAL — correct, but two zero-trust probes were misled by exactly this in one
   // day (2026-07-25): the literal miss read as "absent". Say so up front; stdout,
@@ -196,6 +220,14 @@ async function cmdSearch(
   }
   let outcome: SearchOutcome;
   if (targetStat?.isFile()) {
+    // --in scopes a TREE; the target here is one named file, so the flag can only
+    // be a mistake — either the user meant a different root, or they expect a
+    // filter that will never be consulted. Accepting it and ignoring it would
+    // return that file's hits while the user believes a scope was applied.
+    if (sOpts.pathFilter) {
+      process.stderr.write("myco: --in scopes a directory tree, but the path given is a single file — drop --in, or point at the directory\n");
+      return 2;
+    }
     outcome = await searchFile(root, pattern, sOpts);
   } else {
     // Refresh (incremental) unless told not to, so results are never stale.
@@ -268,6 +300,7 @@ async function run(argv: string[]): Promise<number> {
       "no-gitignore": { type: "boolean" },
       "no-refresh": { type: "boolean" },
       "max-size": { type: "string" },
+      in: { type: "string", multiple: true },
       vendored: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
