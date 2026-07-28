@@ -10,6 +10,33 @@ have fixed a case where the tool returned a narrower answer than the truth
 without saying so.** Each one is listed as a fix, but the recurring lesson is
 that the silence was the defect, not the narrowing.
 
+## [0.2.1]
+
+### Security
+
+- Moved every accepted JavaScript regex operation into a killable worker with a
+  hard per-operation deadline. The previous wall-clock check ran only between
+  files and could not pre-empt one catastrophic `RegExp.exec()`.
+- Added a regression using the overlapping-alternation pattern `(a|aa)+$`; the
+  worker is terminated and the result is marked incomplete instead of blocking
+  Myco's main process.
+
+### Fixed
+
+- Regex line-prefix caps are now counted and reported. A match beyond the
+  200,000-character cap can no longer be presented as an ordinary zero.
+- Split result-limit, whole-search timeout, regex-operation timeout and
+  line-prefix truncation evidence in both the library result and JSON summary.
+- Incomplete coverage now exits `2` even when partial matches exist; it can no
+  longer masquerade as a complete grep-compatible success or absence.
+- Exported `searchFile` from the public library surface.
+- Corrected the package lock's stale `0.1.0` and MIT root metadata.
+
+### Design
+
+- Added `TRIREGEX-INTEGRATION.md`. TriRegex is not yet a drop-in Myco backend:
+  certified find-all, smart-case, span units and compatibility gates remain.
+
 ## [0.2.0]
 
 The first release that adds a narrowing on purpose — and therefore the clearest

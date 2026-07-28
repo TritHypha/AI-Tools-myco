@@ -4,7 +4,13 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { buildIndex, search, isError, detectRegexIntent } from "../src/index.ts";
+import {
+  buildIndex,
+  search,
+  searchFile,
+  isError,
+  detectRegexIntent,
+} from "../src/index.ts";
 import type { Match, SearchOptions } from "../src/index.ts";
 import { summaryLine } from "../src/output.ts";
 
@@ -187,6 +193,58 @@ test("regex search scans all files and matches a pattern", async () => {
     const hits = await run(dir, "gr\\w+ph", { mode: "regex" });
     assert.ok(hits.length >= 1);
     assert.ok(hits.every((m) => m.path.endsWith("c.js")));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("overlapping-alternation regex cannot block the main process", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-redos-"));
+  const file = path.join(dir, "evil.txt");
+  await fs.writeFile(file, "a".repeat(5000) + "!");
+  const opts: SearchOptions = {
+    mode: "regex",
+    caseSensitive: true,
+    files: false,
+    limit: 100,
+    context: 0,
+  };
+  try {
+    const started = Date.now();
+    const outcome = await searchFile(file, "(a|aa)+$", opts);
+    assert.ok(!isError(outcome));
+    if (isError(outcome)) return;
+    assert.equal(outcome.regexTimedOut, true);
+    assert.equal(outcome.truncated, true);
+    assert.ok(Date.now() - started < 2_000, "worker deadline must bound the operation");
+    assert.match(summaryLine(outcome), /exceeded its deadline and was terminated/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("regex line-length coverage cap is explicit, never a silent absence", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-regex-cap-"));
+  const file = path.join(dir, "long.txt");
+  await fs.writeFile(file, "a".repeat(200_001) + "needle");
+  const opts: SearchOptions = {
+    mode: "regex",
+    caseSensitive: true,
+    files: false,
+    limit: 100,
+    context: 0,
+  };
+  try {
+    const outcome = await searchFile(file, "needle", opts);
+    assert.ok(!isError(outcome));
+    if (isError(outcome)) return;
+    assert.equal(outcome.matches.length, 0);
+    assert.equal(outcome.regexLinesTruncated, 1);
+    assert.equal(outcome.truncated, true);
+    assert.match(
+      summaryLine(outcome),
+      /searched only to the 200000-UTF-16-code-unit cap/,
+    );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

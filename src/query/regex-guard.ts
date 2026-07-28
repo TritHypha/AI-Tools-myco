@@ -10,27 +10,30 @@
 //      (nested expanding quantifiers, i.e. "star height >= 2", and absurd bounded
 //      repetition counts). Deterministic; the primary, fail-closed defense — a
 //      pattern judged unsafe is NEVER compiled or run.
-//   2. MAX_REGEX_LINE_LEN — bounds the input handed to any single match, so the
-//      `n` in an O(2^n) / O(n^2) blow-up cannot be driven arbitrarily high.
-//   3. SEARCH_TIME_BUDGET_MS — a wall-clock ceiling on one search's verify phase;
-//      a slow-but-not-refused pattern cannot run forever.
+//   2. MAX_REGEX_LINE_LEN — bounds the input handed to any single match and is
+//      reported whenever it narrows coverage.
+//   3. REGEX_OPERATION_TIME_BUDGET_MS — the main thread kills the isolated worker
+//      when one accepted RegExp call exceeds this deadline.
+//   4. SEARCH_TIME_BUDGET_MS — a wall-clock ceiling on the complete verify phase.
 //
 // This is a MITIGATION, not immunity. True ReDoS-immunity needs a non-backtracking
 // engine (RE2, or a ternary automaton — see the TriRegex / RD-0459 R&D). The static
-// check is deliberately CONSERVATIVE: it can still pass an overlapping-alternation
-// pattern like /(a|ab)*/, which layers 2 and 3 then bound. It errs toward allowing
-// ordinary patterns and refusing only the shapes that are exponential by construction.
+// check is deliberately CONSERVATIVE: it can still pass overlapping alternation.
+// The killable worker is therefore the enforcement boundary, not this heuristic.
 
 /** Bounded-repetition count at/above which a quantifier is refused outright. */
 export const MAX_REPETITION = 1000;
 
-/** A single line longer than this is matched only up to this prefix — bounds one
+/** A line longer than this many UTF-16 code units is matched only to this prefix — bounds one
  *  exec's input. (myco already skips whole files over --max-size; this bounds the
  *  rare pathological single line, e.g. a minified blob, within an allowed file.) */
 export const MAX_REGEX_LINE_LEN = 200_000;
 
 /** Wall-clock ceiling for one search's verify phase; exceeded => stop + truncate. */
 export const SEARCH_TIME_BUDGET_MS = 5_000;
+
+/** Hard deadline for one isolated RegExp operation. The worker is terminated. */
+export const REGEX_OPERATION_TIME_BUDGET_MS = 250;
 
 export type RegexVerdict = { safe: true } | { safe: false; reason: string };
 

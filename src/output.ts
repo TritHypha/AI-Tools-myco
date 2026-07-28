@@ -6,6 +6,7 @@
 // and still pipe-friendly.
 
 import type { Match, SearchResult } from "./query/search.ts";
+import { MAX_REGEX_LINE_LEN } from "./query/regex-guard.ts";
 
 export interface RenderOptions {
   color: boolean;
@@ -125,6 +126,10 @@ export function render(
           filesMatched: result.filesMatched,
           hits: result.matches.length,
           truncated: result.truncated,
+          resultLimitExceeded: result.resultLimitExceeded,
+          searchTimeBudgetExceeded: result.searchTimeBudgetExceeded,
+          regexTimedOut: result.regexTimedOut,
+          regexLinesTruncated: result.regexLinesTruncated,
           wordBoundaryExcluded: result.wordBoundaryExcluded,
           prunedToZero: result.prunedToZero,
           pathFilterExcluded: result.pathFilterExcluded,
@@ -148,7 +153,19 @@ export function summaryLine(result: SearchResult): string {
     `${result.filesMatched} file${result.filesMatched === 1 ? "" : "s"}`,
     `(${result.filesSearched} searched)`,
   ];
-  if (result.truncated) bits.push("[truncated — raise --limit]");
+  if (result.resultLimitExceeded) bits.push("[truncated — raise --limit]");
+  if (result.searchTimeBudgetExceeded) {
+    bits.push("[incomplete — search time budget expired]");
+  }
+  if (result.regexTimedOut) {
+    bits.push("[incomplete — regex operation exceeded its deadline and was terminated]");
+  }
+  if (result.regexLinesTruncated > 0) {
+    const n = result.regexLinesTruncated;
+    bits.push(
+      `[incomplete — ${n} over-size regex line${n === 1 ? "" : "s"} searched only to the ${MAX_REGEX_LINE_LEN}-UTF-16-code-unit cap]`,
+    );
+  }
   // Never let a narrowed result read as absence. If whole-word matching threw away
   // files that DO contain the pattern, say so and name the escape hatch — the same
   // "no silent caps" rule the over-size skip note already follows.

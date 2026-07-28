@@ -90,8 +90,10 @@ Two phases:
    - *substring*: for each token, union of every dictionary term that contains it,
      then intersect across tokens (still index-driven).
    - *regex*: no reliable prune → scan all indexed files (documented cost).
-2. **Verify** — read only the candidate files and confirm real matches with a
-   precise `RegExp` (word-boundary / substring / raw regex), honoring smart-case.
+2. **Verify** — read only the candidate files and confirm real matches. Word and
+   substring modes use the local precise matcher. Raw regex operations execute in
+   a killable worker with a per-operation deadline, plus whole-search and input
+   bounds; every reached bound is represented in `SearchResult`.
 
 Because phase 1 uses the graph, a selective query reads a handful of files where
 grep reads the whole tree. The AND-intersection means a two-word query is *more*
@@ -146,8 +148,10 @@ myco reads files and writes only `./.myco/`. Notable choices:
   named one-per-line by `myco index`, and flagged with a one-line note on the
   search path (stderr only, so piped/JSON stdout stays clean). A bounded
   coverage cap that hides what it dropped turns "no matches" into a lie.
-- Regex is user-supplied and run only against file text (no ReDoS mitigation yet
-  — see §10).
+- Regex is user-supplied. Known catastrophic shapes are statically refused; all
+  accepted JavaScript regex operations run in an isolated worker that is
+  terminated on deadline. This contains a stalled engine call but does not make
+  JavaScript regex linear-time.
 
 ## 9. Extension: the code-structure layer (roadmap)
 
@@ -172,8 +176,9 @@ forward/inverted split already supports adding a second edge type.
 - **No positional index.** Verify re-reads candidate files to get line/col. A
   positional index would let common-term queries skip the re-read.
 - **Regex = full scan** of the indexed set (no literal extraction to prune yet).
-- **No ReDoS guard** on user regex. A future version should bound backtracking or
-  use a linear engine.
+- **The current regex engine is still backtracking JavaScript.** Worker
+  termination makes it pre-emptible, and every incomplete result is surfaced,
+  but a compatible certified-linear TriRegex find-all backend is still pending.
 - **Ignore is a subset**, not full gitignore (§7).
 - **Content-skipped files are name-invisible too.** A binary or over-size file
   gets no file node at all, so `-f` filename search cannot find it either —

@@ -1,6 +1,6 @@
 {
   "name": "myco",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "grep, but it grows a graph â€” a graph-indexed search tool for file contents and filenames. Smart-case, token-precise, and instant on repeat searches.",
   "type": "module",
   "bin": {
@@ -14,6 +14,7 @@
     "README.md",
     "DESIGN.md",
     "CHANGELOG.md",
+    "TRIREGEX-INTEGRATION.md",
     "LICENSE",
     "NOTICE"
   ],

@@ -6,6 +6,7 @@ import {
   selfTest,
   MAX_REPETITION,
   MAX_REGEX_LINE_LEN,
+  REGEX_OPERATION_TIME_BUDGET_MS,
   SEARCH_TIME_BUDGET_MS,
 } from "../src/query/regex-guard.ts";
 
@@ -49,5 +50,7 @@ test("the guard ships a passing self-test (baseline)", () => {
 test("constants are sane bounds", () => {
   assert.ok(MAX_REPETITION >= 100);
   assert.ok(MAX_REGEX_LINE_LEN >= 10_000);
+  assert.ok(REGEX_OPERATION_TIME_BUDGET_MS >= 50);
+  assert.ok(REGEX_OPERATION_TIME_BUDGET_MS < SEARCH_TIME_BUDGET_MS);
   assert.ok(SEARCH_TIME_BUDGET_MS >= 1_000);
 });

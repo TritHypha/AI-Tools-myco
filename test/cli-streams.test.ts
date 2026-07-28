@@ -91,3 +91,14 @@ test("a REAL error still goes to stderr and exits non-zero (stderr stays trustwo
     assert.notEqual(r.err, "", "a real error MUST write to stderr");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("an incomplete regex result exits 2 even though diagnostic evidence is returned", async () => {
+  const dir = fixture();
+  const file = path.join(dir, "evil.txt");
+  writeFileSync(file, "a".repeat(5000) + "!");
+  try {
+    const r = await runCli(["-e", "(a|aa)+$", file, "--no-color"]);
+    assert.equal(r.code, 2, `incomplete coverage must fail closed, got ${r.code}`);
+    assert.match(r.out, /exceeded its deadline and was terminated/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

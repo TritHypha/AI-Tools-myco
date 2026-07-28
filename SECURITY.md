@@ -50,11 +50,12 @@ Being clear about the shape of the tool makes reports easier to judge:
 ### In scope
 
 - **ReDoS / catastrophic backtracking** via `-e` user regexes. There is an
-  existing guard (`src/query/regex-guard.ts`): patterns that are exponential by
-  construction are refused before compilation, and matching is bounded by an
-  input-length cap and a wall-clock budget. This is a **mitigation, not immunity**
-  — a genuinely non-backtracking engine is the real fix. A pattern that defeats
-  the guard and hangs a search is a valid report.
+  existing static guard (`src/query/regex-guard.ts`), but it is not treated as a
+  proof. Every accepted JavaScript regex operation runs in a worker; exceeding
+  the deadline terminates that worker and produces an explicitly incomplete
+  result. A pattern that blocks the main process, escapes the deadline, or returns
+  an unlabelled partial result is a valid report. A certified-linear TriRegex
+  find-all backend remains the preferred long-term replacement.
 - **Path traversal / writing outside the search root** — the indexer walks a tree
   and must not follow symlinks out of it or write anywhere but `.myco/`.
 - **Crashes or unbounded memory** on hostile input: adversarial filenames,

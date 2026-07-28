@@ -280,6 +280,15 @@ async function cmdSearch(
   // stderr-non-empty is a trustworthy failure signal at the shell/tool boundary.
   if (!values["json"]) process.stdout.write(summaryLine(outcome) + "\n");
 
+  // An incomplete coverage result is evidence, but never a successful proof of
+  // presence or absence. Preserve the body/JSON for diagnosis and fail the
+  // process boundary closed. A user-requested result limit is different: it
+  // proves at least the returned matches and remains a normal capped result.
+  if (
+    outcome.searchTimeBudgetExceeded ||
+    outcome.regexTimedOut ||
+    outcome.regexLinesTruncated > 0
+  ) return 2;
   return outcome.matches.length > 0 ? 0 : 1;
 }
 

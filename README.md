@@ -79,11 +79,13 @@ rule as the over-size skip note: **a coverage cap is never a silent one.**
   — **and says so**: over-size skips are counted, listed by `myco index`, and
   noted on the search path. A coverage cap is never a silent one.
 - **Zero runtime dependencies.** Pure Node built-ins.
-- **ReDoS-guarded regex** — a user `-e` pattern that is exponential by construction
-  (nested unbounded quantifiers like `(a+)+`, absurd repetition counts) is **refused
-  before it runs**, and matching is bounded by an input-length cap and a wall-clock
-  budget. A search can never be turned into a hang. (A mitigation, not full immunity —
-  that needs a non-backtracking engine; the refusal + bounds close the practical hole.)
+- **Pre-emptible regex execution** — known exponential shapes are refused before
+  compilation, and every remaining JavaScript regex operation runs in a worker
+  with a hard deadline. If it stalls, the worker is terminated and the result is
+  explicitly marked incomplete. Over-size line prefixes and search/result limits
+  are also reported; a narrowed regex result never presents itself as absence.
+  TriRegex remains the proposed non-backtracking backend once its find-all and
+  Myco-compatibility contract is complete.
 
 ## Install
 
@@ -127,7 +129,10 @@ myco status [path]           show index statistics
 | `--no-gitignore` | do not honour `.gitignore` |
 | `--max-size N` | skip files larger than N MB (default 5) |
 
-Exit codes: `0` matches found · `1` no matches · `2` error (grep-compatible).
+Exit codes: `0` matches found · `1` no matches · `2` error or incomplete
+coverage. Regex timeout, whole-search timeout, and regex line-cap truncation
+are incomplete and therefore fail closed with `2`; JSON still carries the
+partial evidence and exact reason.
 
 ## How it works
 
@@ -164,6 +169,9 @@ grep; every search after that reads the index plus only the candidate files.
 - Positional index (store line offsets) to skip re-reading candidates.
 - Worker-thread parallel indexing for large trees.
 - A compact binary index format.
+- **TriRegex backend** after certified find-all, smart-case, span-unit and
+  supported-subset compatibility gates pass; see
+  [TRIREGEX-INTEGRATION.md](TRIREGEX-INTEGRATION.md).
 
 ## Contributing
 
