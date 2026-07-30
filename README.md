@@ -70,9 +70,12 @@ rule as the over-size skip note: **a coverage cap is never a silent one.**
 - **Unicode-correct** — `café` matches `CAFÉ`; accents are preserved (they change
   the word), only case is folded.
 - **Filenames *and* contents** — `-f` searches paths through the same graph.
-- **Always fresh, still fast** — every search does a cheap incremental refresh
-  first (changed files are re-read, unchanged files are only `stat`'d), so you
-  never get stale results. `--no-refresh` skips it for maximum speed.
+- **Metadata-refreshed, still fast** — every search does a cheap incremental
+  refresh first (changed files are re-read, unchanged files are only
+  `stat`'d). This is an interactive freshness heuristic, not cryptographic
+  content identity: preserved size+mtime can evade it. `--no-refresh` searches
+  only a previously admitted bounded index; a future content-verified mode is
+  required for security-sensitive absence claims.
 - **Ranked output** — the file with the most hits comes first, not filesystem
   order.
 - **Respects `.gitignore`** (and `.mycoignore`), skips binaries, caps huge files
@@ -146,7 +149,10 @@ Two phases, and that is the whole performance story:
 The index lives in `.myco/index.json` at the root you search. Only the *forward*
 index (each file → its term counts) is written; the inverted and filename
 indexes are rebuilt in memory on load, which is what makes incremental
-re-indexing cheap. See [DESIGN.md](DESIGN.md) for the full model.
+re-indexing cheap. The file is untrusted input: Myco bounds its bytes and
+collections, requires a closed record shape and canonical root-relative paths,
+rejects duplicate identities, and refuses a symlinked index that resolves
+outside the root. See [DESIGN.md](DESIGN.md) for the full model.
 
 ## Honest performance notes
 

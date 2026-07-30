@@ -44,8 +44,9 @@ Being clear about the shape of the tool makes reports easier to judge:
 - It makes **no network requests**, has **zero runtime dependencies**, and does
   not read credentials or environment secrets.
 - Its inputs are: your search pattern, the CLI flags, and the contents and paths
-  of the tree you search. **A hostile *tree* is a real input** — myco may be run
-  over a repository someone else wrote.
+  of the tree you search, including a pre-existing `.myco/index.json`.
+  **A hostile tree and cache are real inputs** — Myco may be run over a
+  repository someone else wrote.
 
 ### In scope
 
@@ -56,8 +57,9 @@ Being clear about the shape of the tool makes reports easier to judge:
   result. A pattern that blocks the main process, escapes the deadline, or returns
   an unlabelled partial result is a valid report. A certified-linear TriRegex
   find-all backend remains the preferred long-term replacement.
-- **Path traversal / writing outside the search root** — the indexer walks a tree
-  and must not follow symlinks out of it or write anywhere but `.myco/`.
+- **Path traversal / reads or writes outside the search root** — the indexer
+  walks a tree and must not follow symlinks out of it, a persisted graph must
+  not redirect search reads, and Myco must not write anywhere but `.myco/`.
 - **Crashes or unbounded memory** on hostile input: adversarial filenames,
   enormous or malformed files, deeply nested directories, encoding edge cases.
 - **Index poisoning** — a crafted tree or a tampered `.myco/index.json` causing
@@ -83,4 +85,7 @@ Being clear about the shape of the tool makes reports easier to judge:
 myco performs no cryptographic operations and stores no secrets. Its index
 contains file paths and folded word terms drawn from the tree you index — so
 treat `.myco/index.json` with the same care as the tree itself. It is gitignored
-by default; do not commit one.
+by default; do not commit one. The loader treats it as untrusted and admits only
+a bounded closed shape with canonical root-relative paths. The normal refresh
+uses metadata equality for speed; it is not cryptographic proof that unchanged
+bytes were read.

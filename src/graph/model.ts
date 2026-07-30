@@ -16,6 +16,8 @@
 // inverted index (term -> files) and the name index are derived from it in
 // memory, which is what makes incremental re-indexing cheap.
 
+import { isCanonicalIndexPath } from "./index-contract.ts";
+
 export type FileId = number;
 
 // A file node.
@@ -56,6 +58,9 @@ export class SearchGraph {
     size: number,
     counts: TermCounts,
   ): FileId {
+    if (!isCanonicalIndexPath(path)) {
+      throw new Error("MYCO-INDEX-PATH: file path must be canonical and root-relative");
+    }
     const existing = this.idByPath.get(path);
     if (existing !== undefined) this.removeFile(path);
 

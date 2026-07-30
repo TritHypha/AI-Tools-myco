@@ -10,6 +10,31 @@ have fixed a case where the tool returned a narrower answer than the truth
 without saying so.** Each one is listed as a fix, but the recurring lesson is
 that the silence was the defect, not the narrowing.
 
+## [Unreleased]
+
+### Security
+
+- Refuse a persisted file record unless its path is a canonical non-empty
+  POSIX-relative path. Parent, dot, empty, backslash, POSIX-absolute,
+  Windows-drive and UNC forms invalidate the complete index.
+- Close the demonstrated `--no-refresh` path escape in which a crafted
+  `.myco/index.json` could make search read and return matching content outside
+  the indexed root.
+- Treat the decoded cache as hostile: exact record keys, bounded bytes/files/
+  term edges, unique file and term identities, finite metadata and positive
+  counts are required before graph construction.
+- Refuse a direct index symlink or a symlinked `.myco` directory whose resolved
+  index escapes the search root.
+- Repeat the canonical-path invariant in `SearchGraph.setFile()` so
+  programmatic construction cannot bypass the persisted loader.
+
+### Changed
+
+- Persist file and term records in canonical lexical order.
+- Replace the “always fresh” claim with the precise contract: the default fast
+  refresh is metadata-fresh, not content-identity proof. Security-sensitive
+  absence claims require the planned content-verified evidence tier.
+
 ## [0.2.1]
 
 ### Security

@@ -78,7 +78,11 @@ stores absolute paths (see §8).
    edge; vanished files are dropped.
 
 Incremental by construction: re-indexing after editing one file re-reads exactly
-one file.
+one file. This is deliberately labelled **metadata freshness**, not content
+identity. A filesystem or hostile tool can preserve size and modification time
+while changing bytes. Any future use that needs to prove absence must use a
+content-verified evidence tier rather than promoting this fast path to
+authority.
 
 ## 5. Query pipeline (`src/query/search.ts`)
 
@@ -140,6 +144,16 @@ myco reads files and writes only `./.myco/`. Notable choices:
 - **No absolute paths persisted.** The index stores paths relative to the root;
   the root is derived from where `.myco/` sits. The artifact is portable and
   never embeds a machine path.
+- **The persisted graph is untrusted.** Loading requires an exact closed shape,
+  bounded bytes/files/term edges, canonical non-empty POSIX-relative paths,
+  positive counts and unique file/term identities. Windows/POSIX absolute,
+  backslash, empty, dot and parent segments refuse the complete index.
+- **Containment is re-derived.** A symlinked `.myco` directory whose real index
+  resolves outside the search root refuses. `SearchGraph.setFile()` repeats the
+  canonical-path invariant so a programmatic graph cannot bypass the loader.
+- **Persistence order is canonical.** File records sort by path and term records
+  sort by term. `createdAt` remains observational metadata and is not semantic
+  graph identity.
 - **Symlinks are not followed** during the walk — avoids cycles and escaping the
   root.
 - **No code execution, no network.** Pure Node built-ins; nothing is `eval`'d.
@@ -172,7 +186,12 @@ forward/inverted split already supports adding a second edge type.
 ## 10. Known limitations (honest)
 
 - **In-memory JSON index.** Fine for typical repos; a very large tree will want a
-  columnar/binary store and streaming. Roadmapped.
+  columnar/binary store and streaming. The current decoder refuses beyond its
+  declared byte and collection ceilings before constructing a graph.
+- **Metadata freshness is not content proof.** Size+mtime preserves the repeat
+  search advantage but cannot support an authority-sensitive absence claim.
+  A future strict mode must hash source bytes and emit a replayable evidence
+  receipt.
 - **No positional index.** Verify re-reads candidate files to get line/col. A
   positional index would let common-term queries skip the re-read.
 - **Regex = full scan** of the indexed set (no literal extraction to prune yet).
