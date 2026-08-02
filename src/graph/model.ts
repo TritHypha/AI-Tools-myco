@@ -46,6 +46,11 @@ export class SearchGraph {
   // NAME index (derived): a term appearing in a file's path -> file ids.
   private readonly names = new Map<string, Set<FileId>>();
 
+  // Running total of forward (file -> term) edges. Kept incrementally because
+  // the index contract caps this number, and a cap you can only measure by
+  // walking every file is a cap you will check too late to act on.
+  private edges = 0;
+
   private nextId: FileId = 0;
 
   // ---- construction -------------------------------------------------------
@@ -78,6 +83,7 @@ export class SearchGraph {
       }
       bucket.set(id, count);
     }
+    this.edges += counts.size;
     this.indexName(record);
     return id;
   }
@@ -89,6 +95,7 @@ export class SearchGraph {
 
     const counts = this.forward.get(id);
     if (counts) {
+      this.edges -= counts.size;
       for (const term of counts.keys()) {
         const bucket = this.inverted.get(term);
         if (!bucket) continue;
@@ -138,6 +145,13 @@ export class SearchGraph {
 
   termCount(): number {
     return this.inverted.size;
+  }
+
+  // Total forward (file -> term) edges — the quantity MAX_INDEX_TERM_EDGES
+  // bounds. O(1) so an indexer can check the ceiling after every file rather
+  // than discovering it only once the graph is already too big to hold.
+  termEdgeCount(): number {
+    return this.edges;
   }
 
   // The forward edges of a file node (its term counts) — used to persist.

@@ -17,7 +17,8 @@ import * as path from "node:path";
 
 import { buildIndex, DEFAULT_INDEX_OPTIONS } from "./ingest/indexer.ts";
 import type { IndexOptions } from "./ingest/indexer.ts";
-import { loadGraph } from "./graph/store.ts";
+import { loadGraph, loadGraphOutcome } from "./graph/store.ts";
+import type { SaveOutcome } from "./graph/store.ts";
 import { buildPathFilter } from "./query/path-filter.ts";
 import { search, searchFile, isError, detectRegexIntent } from "./query/search.ts";
 import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts";
@@ -114,7 +115,7 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
     return 2;
   }
   const started = process.hrtime.bigint();
-  const { stats, skippedLargePaths, skippedVendoredDirs } = await buildIndex(root, index);
+  const { stats, saved, skippedLargePaths, skippedVendoredDirs } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   // Informational output → stdout. stderr is reserved for real errors (which all
   // exit non-zero), so a consumer can treat any stderr output — or a non-zero exit —
@@ -126,6 +127,7 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
       `${stats.skippedLarge} over-size skipped) ` +
       `in ${ms.toFixed(0)}ms\n`,
   );
+  noteSaveOutcome(saved);
   // No silent caps: name the files that fell outside the index, so a search that
   // returns nothing is never mistaken for "not present" (DESIGN §8/§10).
   if (skippedLargePaths.length > 0) {
@@ -146,12 +148,35 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   return 0;
 }
 
+// A cache that declined to persist must be reported wherever indexing happens.
+// Silence here is what turns one refusal into an unbounded repeat: the work is
+// redone on every invocation and the user is never told there is a ceiling to
+// act on. Informational → stdout; the search itself still succeeded.
+function noteSaveOutcome(saved: SaveOutcome): void {
+  if (saved.written) return;
+  process.stdout.write(
+    `myco: note — index NOT cached: ${saved.edges.toLocaleString()} term edges `
+      + `exceeds the ${saved.limit.toLocaleString()} ceiling. Results are correct, `
+      + `but every run re-indexes from scratch. Index a narrower root to restore caching.\n`,
+  );
+}
+
 async function cmdStatus(root: string): Promise<number> {
-  const loaded = await loadGraph(root);
-  if (!loaded) {
-    process.stderr.write(`no index at ${path.join(root, ".myco")} — run: myco index\n`);
+  const outcome = await loadGraphOutcome(root);
+  if (outcome.status !== "ok") {
+    // "rejected" and "absent" are different problems with different remedies —
+    // one needs a rebuild, the other needs the stale artifact removed. Reporting
+    // both as "no index" sends the user to the wrong fix.
+    process.stderr.write(
+      outcome.status === "rejected"
+        ? `index at ${path.join(root, ".myco")} exists but was REFUSED `
+          + `(over a contract limit, corrupt, or an incompatible format) — `
+          + `delete it and run: myco index\n`
+        : `no index at ${path.join(root, ".myco")} — run: myco index\n`,
+    );
     return 2;
   }
+  const loaded = outcome;
   let bytes = 0;
   try {
     bytes = (await fs.stat(path.join(root, ".myco", "index.json"))).size;
@@ -240,12 +265,22 @@ async function cmdSearch(
       }
       graph = loaded.graph;
     } else {
-      if ((await loadGraph(root)) === null) {
+      // Say WHICH of the two reasons applies. Reporting a refused index as a
+      // "first run" is how an over-ceiling cache stayed invisible: the message
+      // was reassuring, identical every time, and pointed at nothing to fix.
+      const prior = await loadGraphOutcome(root);
+      if (prior.status === "rejected") {
+        process.stdout.write(
+          `myco: existing index at ${path.join(path.resolve(root), ".myco")} was REFUSED `
+            + `(over a contract limit, corrupt, or an incompatible format) — re-indexing…\n`,
+        );
+      } else if (prior.status === "absent") {
         // Informational note → stdout (stderr is errors only).
         process.stdout.write(`myco: indexing ${path.resolve(root)} (first run)…\n`);
       }
       const built = await buildIndex(root, iOpts);
       graph = built.graph;
+      if (!values["json"]) noteSaveOutcome(built.saved);
       // Surface an over-size skip even on the search path — otherwise an oversized file
       // silently misses and a zero-result reads as "absent" (the recurring "we keep
       // missing things" failure). Informational → stdout: a skip is not a failure.

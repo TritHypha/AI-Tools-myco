@@ -12,6 +12,28 @@ that the silence was the defect, not the narrowing.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The writer now refuses what the reader refuses.** The term-edge ceiling was
+  enforced only on load, so an index above it was rejected, rebuilt identically,
+  and rejected again — a cache that could never hit. `saveGraph()` now declines
+  to write an over-ceiling index and reports why, instead of leaving a file on
+  disk that no reader will accept.
+- **A refusal no longer reports itself as an absence.** `loadGraph()` collapsed
+  "no index yet" and "index refused" into `null`, so a rejected cache announced
+  `(first run)` on every invocation and gave the user nothing to act on. The new
+  `loadGraphOutcome()` returns `ok` / `absent` / `rejected`, and the CLI and
+  `myco status` state which applies and which remedy fits.
+- **Indexing a tree past the ceiling refuses instead of exhausting the heap.**
+  Building continued to a graph that could not be serialised; at the sizes this
+  triggers on, the process aborted (exit 134) with no diagnosis. It now stops at
+  the ceiling with `MYCO-INDEX-TOO-LARGE`, naming the limit, the file count
+  reached, and the remedy (index a narrower root).
+
+  Found by running `myco` at a directory holding several repositories: 11,110
+  files, 3,063,529 term edges against a 2,000,000 ceiling. The ceiling itself is
+  correct and unchanged — it was arriving too late and too quietly.
+
 ### Security
 
 - Refuse a persisted file record unless its path is a canonical non-empty

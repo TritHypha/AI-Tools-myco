@@ -12,7 +12,11 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { MAX_INDEX_BYTES, validateStoredIndex } from "./index-contract.ts";
+import {
+  MAX_INDEX_BYTES,
+  MAX_INDEX_TERM_EDGES,
+  validateStoredIndex,
+} from "./index-contract.ts";
 import type { StoredFile, StoredIndex } from "./index-contract.ts";
 import { SearchGraph } from "./model.ts";
 import type { TermCounts } from "./model.ts";
@@ -32,6 +36,28 @@ export interface LoadGraphOptions {
   maxIndexBytes?: number;
 }
 
+export interface SaveGraphOptions {
+  /** Tests may tighten this ceiling; callers cannot raise the fixed maximum. */
+  maxTermEdges?: number;
+}
+
+// Resolve a caller-supplied term-edge ceiling against the fixed contract
+// maximum. A request to RAISE the ceiling is not honoured and not an error —
+// it silently clamps — because the persisted format's limit is the reader's
+// guarantee, and a writer that could lift it would put files on disk that no
+// reader will accept. Tightening is allowed so tests can exercise the refusal
+// without building a multi-million-edge fixture.
+export function clampTermEdgeCeiling(requested: number | undefined): number {
+  if (
+    requested === undefined
+    || !Number.isSafeInteger(requested)
+    || requested < 0
+  ) {
+    return MAX_INDEX_TERM_EDGES;
+  }
+  return Math.min(requested, MAX_INDEX_TERM_EDGES);
+}
+
 function indexPath(root: string): string {
   return path.join(root, INDEX_DIR, INDEX_FILE);
 }
@@ -40,8 +66,31 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+// Why a save can decline to write. `ok` is the normal path; `term-edge-ceiling`
+// means the graph is larger than the reader will ever accept back.
+export type SaveOutcome =
+  | { written: true }
+  | { written: false; reason: "term-edge-ceiling"; edges: number; limit: number };
+
 // Write the graph to <root>/.myco/index.json (creating the dir if needed).
-export async function saveGraph(root: string, graph: SearchGraph): Promise<void> {
+//
+// The writer enforces the SAME ceiling the reader enforces. Without this the
+// two halves of the contract disagree: `saveGraph` would happily persist an
+// index that `validateStoredIndex` rejects on sight, so every later run would
+// discard the cache, rebuild it, and write the identical rejected file again —
+// a cache that can never hit, costing a full re-index forever with nothing said
+// out loud. Declining to write is the honest outcome: the caller is told, and
+// no poisoned artifact is left on disk pretending to be a usable cache.
+export async function saveGraph(
+  root: string,
+  graph: SearchGraph,
+  options: SaveGraphOptions = {},
+): Promise<SaveOutcome> {
+  const limit = clampTermEdgeCeiling(options.maxTermEdges);
+  const edges = graph.termEdgeCount();
+  if (edges > limit) {
+    return { written: false, reason: "term-edge-ceiling", edges, limit };
+  }
   const files: StoredFile[] = [];
   for (const rec of graph.files()) {
     const counts = graph.forwardOf(rec.id);
@@ -58,20 +107,46 @@ export async function saveGraph(root: string, graph: SearchGraph): Promise<void>
   const dir = path.join(root, INDEX_DIR);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(indexPath(root), JSON.stringify(payload), "utf8");
+  return { written: true };
 }
 
+// Why a load produced no graph. `absent` = nothing to read (a genuine first
+// run); `rejected` = an index EXISTS on disk but failed the contract.
+//
+// These are different facts and must not share a signal. Collapsing them to
+// `null` is what let an over-ceiling index report itself as "first run" on
+// every invocation: a refusal rendering as an absence, so the user sees a slow
+// tool rather than a stated reason and has nothing to act on.
+export type LoadStatus = "ok" | "absent" | "rejected";
+
 // Load the graph from disk, or null if there is no (compatible) index yet.
+// Kept for callers that only need the graph; `loadGraphOutcome` is the form
+// that can tell "no index" apart from "index refused".
 export async function loadGraph(
   root: string,
   options: LoadGraphOptions = {},
 ): Promise<{ graph: SearchGraph; meta: IndexMeta } | null> {
+  const outcome = await loadGraphOutcome(root, options);
+  return outcome.status === "ok"
+    ? { graph: outcome.graph, meta: outcome.meta }
+    : null;
+}
+
+// Load the graph and SAY WHY when there is none.
+export async function loadGraphOutcome(
+  root: string,
+  options: LoadGraphOptions = {},
+): Promise<
+  | { status: "ok"; graph: SearchGraph; meta: IndexMeta }
+  | { status: "absent" | "rejected" }
+> {
   const maxIndexBytes = options.maxIndexBytes ?? MAX_INDEX_BYTES;
   if (
     !Number.isSafeInteger(maxIndexBytes)
     || maxIndexBytes < 1
     || maxIndexBytes > MAX_INDEX_BYTES
   ) {
-    return null;
+    return { status: "rejected" };
   }
   let text: string;
   try {
@@ -87,24 +162,25 @@ export async function loadGraph(
       || relativeIndex.startsWith(`..${path.sep}`)
       || path.isAbsolute(relativeIndex)
     ) {
-      return null;
+      return { status: "rejected" };
     }
     const stat = await fs.lstat(requestedIndex);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxIndexBytes) {
-      return null;
+      return { status: "rejected" };
     }
     text = await fs.readFile(requestedIndex, "utf8");
   } catch {
-    return null;
+    // Nothing readable at <root>/.myco/index.json — a genuine first run.
+    return { status: "absent" };
   }
   let decoded: unknown;
   try {
     decoded = JSON.parse(text) as unknown;
   } catch {
-    return null; // corrupt index — treat as absent, a re-index will rewrite it
+    return { status: "rejected" }; // a file IS there; it is corrupt, not missing
   }
   const data = validateStoredIndex(decoded);
-  if (data === null) return null;
+  if (data === null) return { status: "rejected" };
 
   const graph = new SearchGraph();
   try {
@@ -113,9 +189,10 @@ export async function loadGraph(
       graph.setFile(f.p, f.m, f.s, counts);
     }
   } catch {
-    return null;
+    return { status: "rejected" };
   }
   return {
+    status: "ok",
     graph,
     meta: {
       createdAt: data.createdAt,
