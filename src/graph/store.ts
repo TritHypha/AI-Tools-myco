@@ -169,9 +169,13 @@ export async function loadGraphOutcome(
       return { status: "rejected" };
     }
     text = await fs.readFile(requestedIndex, "utf8");
-  } catch {
-    // Nothing readable at <root>/.myco/index.json — a genuine first run.
-    return { status: "absent" };
+  } catch (error: unknown) {
+    // Only a genuinely missing path is absence. Permission failures, invalid
+    // paths and I/O faults are rejected evidence, never a reassuring first run.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { status: "absent" };
+    }
+    return { status: "rejected" };
   }
   let decoded: unknown;
   try {

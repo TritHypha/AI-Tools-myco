@@ -24,6 +24,9 @@ that the silence was the defect, not the narrowing.
   `(first run)` on every invocation and gave the user nothing to act on. The new
   `loadGraphOutcome()` returns `ok` / `absent` / `rejected`, and the CLI and
   `myco status` state which applies and which remedy fits.
+- **Only a missing path is absence.** Filesystem errors other than `ENOENT`
+  (including invalid paths, permission failures and I/O faults) are rejected
+  evidence rather than being relabelled as a first run.
 - **Indexing a tree past the ceiling refuses instead of exhausting the heap.**
   Building continued to a graph that could not be serialised; at the sizes this
   triggers on, the process aborted (exit 134) with no diagnosis. It now stops at

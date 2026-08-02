@@ -132,6 +132,14 @@ test("loadGraphOutcome tells ABSENT apart from REJECTED", async () => {
   assert.equal(refused.status, "rejected", "an over-size index is refused, not absent");
 });
 
+test("loadGraphOutcome treats a non-ENOENT filesystem failure as REJECTED", async () => {
+  // An embedded NUL is rejected by the filesystem API before lookup. It is a
+  // deterministic cross-platform stand-in for permission and I/O failures:
+  // only ENOENT may mean that an index is genuinely absent.
+  const outcome = await loadGraphOutcome(`invalid\0root`);
+  assert.equal(outcome.status, "rejected");
+});
+
 test("CONTROL: a well-formed index loads as ok", async () => {
   const root = await tempRoot();
   await saveGraph(root, graphWithEdges(3));

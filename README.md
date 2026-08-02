@@ -154,6 +154,13 @@ collections, requires a closed record shape and canonical root-relative paths,
 rejects duplicate identities, and refuses a symlinked index that resolves
 outside the root. See [DESIGN.md](DESIGN.md) for the full model.
 
+The writer and reader enforce the same fixed term-edge ceiling. A root that is
+too broad exits with `MYCO-INDEX-TOO-LARGE` and asks for a narrower root instead
+of writing a cache that can never be read back. `myco status` distinguishes “no
+index exists” from “an index exists but was refused”; only an `ENOENT`
+filesystem result means absent. Permission, invalid-path and other I/O failures
+are refused rather than treated as a first run.
+
 ## Honest performance notes
 
 myco is **not** trying to beat [ripgrep](https://github.com/BurntSushi/ripgrep)
