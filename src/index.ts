@@ -4,7 +4,7 @@
 // without touching the CLI. The CLI (cli.ts) is a thin layer over exactly this.
 
 export { SearchGraph, nameTermsOf } from "./graph/model.ts";
-export type { FileId, FileRecord, TermCounts } from "./graph/model.ts";
+export type { FileId, FileRecord, TermCounts, ContentSkip } from "./graph/model.ts";
 
 export { loadGraph, saveGraph, INDEX_DIR, INDEX_FILE } from "./graph/store.ts";
 export type { IndexMeta } from "./graph/store.ts";
@@ -35,4 +35,4 @@ export type {
 export { buildPathFilter, applyPathFilter } from "./query/path-filter.ts";
 export type { PathFilter } from "./query/path-filter.ts";
 
-export const VERSION = "0.2.1";
+export const VERSION = "0.2.2";

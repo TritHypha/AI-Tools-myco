@@ -71,12 +71,37 @@ export async function buildIndex(
   for (const meta of metas) {
     seen.add(meta.relPath);
     const existing = graph.fileByPath(meta.relPath);
+    const wantLarge = meta.contentSkip === "large";
+
+    // Incremental reuse when size+mtime match AND the content-skip role is stable.
+    // Role changes (cap raised/lowered, binary↔text) fall through and re-classify.
     if (
       existing &&
       existing.mtimeMs === meta.mtimeMs &&
       existing.size === meta.size
     ) {
-      stats.unchanged++;
+      if (wantLarge && existing.contentSkip === "large") {
+        stats.unchanged++;
+        continue;
+      }
+      if (!wantLarge && existing.contentSkip === "binary") {
+        stats.unchanged++;
+        stats.skippedBinary++; // still binary this run; no re-sniff needed
+        continue;
+      }
+      if (!wantLarge && existing.contentSkip === undefined) {
+        stats.unchanged++;
+        continue;
+      }
+      // otherwise: large↔content or content↔large transition under same size —
+      // only happens when maxFileSize policy moved; re-apply classification.
+    }
+
+    // Over-size: name-index only, never open the file (DESIGN §10).
+    if (wantLarge) {
+      graph.setFile(meta.relPath, meta.mtimeMs, meta.size, new Map(), "large");
+      if (existing) stats.updated++;
+      else stats.added++;
       continue;
     }
 
@@ -87,8 +112,11 @@ export async function buildIndex(
       continue; // races with deletion, permission errors — skip, don't crash
     }
     if (looksBinary(buf)) {
-      if (existing) graph.removeFile(meta.relPath); // e.g. a file turned binary
+      // Name-index only — still findable by `-f`, never opened for content.
+      graph.setFile(meta.relPath, meta.mtimeMs, meta.size, new Map(), "binary");
       stats.skippedBinary++;
+      if (existing) stats.updated++;
+      else stats.added++;
       continue;
     }
 

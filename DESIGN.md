@@ -199,13 +199,11 @@ forward/inverted split already supports adding a second edge type.
   termination makes it pre-emptible, and every incomplete result is surfaced,
   but a compatible certified-linear TriRegex find-all backend is still pending.
 - **Ignore is a subset**, not full gitignore (§7).
-- **Content-skipped files are name-invisible too.** A binary or over-size file
-  gets no file node at all, so `-f` filename search cannot find it either —
-  the same "miss reads as absent" failure the over-size reporting now guards
-  on the content side (over-size paths are at least listed by `myco index`).
-  Candidate fix: index content-skipped files with an empty term set, so the
-  name index still sees them; the prune phase would never surface them for
-  content queries (no terms), so content search semantics are unchanged.
+- ~~**Content-skipped files are name-invisible too.**~~ **Fixed in 0.2.2.** Binary
+  and over-size files are now file nodes with an empty term set and a
+  `contentSkip` tag (`binary` | `large`). `-f` finds them; content search
+  (including regex full-scan) never opens them. Persisted as optional `k: "b"|"l"`
+  on the file record; unknown keys still refuse.
 
 ## 11. Testing
 

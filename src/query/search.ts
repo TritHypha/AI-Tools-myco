@@ -539,10 +539,14 @@ export async function search(
   }
 
   const ids = candidates(graph, queryTerms(query), opts.mode);
+  // Content-skipped nodes (binary / over-size) are name-indexed only (DESIGN §10).
+  // Word/substring prune never sees them (no terms); regex full-scan and empty-
+  // term edge cases would — filter so size-cap and binary-as-utf8 cannot reopen.
   const unfiltered =
-    ids === null
+    (ids === null
       ? [...graph.files()]
-      : ids.map((id) => graph.file(id)).filter((r) => r !== undefined);
+      : ids.map((id) => graph.file(id)).filter((r) => r !== undefined)
+    ).filter((r) => r.contentSkip === undefined);
 
   // Scope AFTER the prune and BEFORE phase 2, so the filter also saves file reads.
   const { kept: records, excluded: pathExcluded } = applyPathFilter(unfiltered, opts.pathFilter);

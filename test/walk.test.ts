@@ -107,16 +107,18 @@ test("walk honours a leading `**/` ignore rule as match-at-any-depth", async () 
   }
 });
 
-test("walk skips files over the size cap AND reports them (no silent drop)", async () => {
+test("walk lists over-size files as contentSkip=large AND reports them (no silent drop)", async () => {
   const dir = await tmpTree({ "small.txt": "x", "big.txt": "y".repeat(1000) });
   try {
     const skippedLarge: string[] = [];
     const metas = await walk(dir, { maxFileSize: 100, useGitignore: false }, skippedLarge);
-    const rels = new Set(metas.map((m) => m.relPath));
-    assert.ok(rels.has("small.txt"));
-    assert.ok(!rels.has("big.txt"), "big.txt exceeds the cap");
-    // The cap must be VISIBLE, not silent — the over-size file is named in the out-list
-    // so a caller (index/search) can tell the user what fell outside the index.
+    const byPath = new Map(metas.map((m) => [m.relPath, m]));
+    assert.ok(byPath.has("small.txt"));
+    // DESIGN §10: over-size files are still *listed* so the name index can see them,
+    // but marked contentSkip so content is never read. The skip list stays loud.
+    assert.ok(byPath.has("big.txt"), "big.txt is listed for name-indexing");
+    assert.equal(byPath.get("big.txt")?.contentSkip, "large");
+    assert.equal(byPath.get("small.txt")?.contentSkip, undefined);
     assert.deepEqual(skippedLarge, ["big.txt"], "over-size file is reported, never silently dropped");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

@@ -12,8 +12,18 @@ that the silence was the defect, not the narrowing.
 
 ## [Unreleased]
 
+## [0.2.2]
+
 ### Fixed
 
+- **Binary and over-size files are no longer invisible to `-f`.** They were
+  dropped from the graph entirely, so a filename search could not find them —
+  the same "miss reads as absent" class DESIGN §10 called out on the content
+  side. They are now name-indexed nodes with empty term sets and a
+  `contentSkip` tag; content search (including regex full-scan) never opens
+  them. Over-size paths remain listed by `myco index`.
+- Persisted optional `k: "b"|"l"` on file records round-trips the skip reason;
+  a name-only row that carries term postings still refuses the whole index.
 - **The writer now refuses what the reader refuses.** The term-edge ceiling was
   enforced only on load, so an index above it was rejected, rebuilt identically,
   and rejected again — a cache that could never hit. `saveGraph()` now declines
@@ -55,6 +65,8 @@ that the silence was the defect, not the narrowing.
 
 ### Changed
 
+- Walk emits over-size files as `contentSkip: "large"` metas (still reported in
+  the skip list) so the indexer can name-index without reading bytes.
 - Persist file and term records in canonical lexical order.
 - Replace the “always fresh” claim with the precise contract: the default fast
   refresh is metadata-fresh, not content-identity proof. Security-sensitive

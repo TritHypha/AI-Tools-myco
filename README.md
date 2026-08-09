@@ -176,9 +176,8 @@ grep; every search after that reads the index plus only the candidate files.
 - **Code-structure layer** — parse source into symbol nodes (`defines`,
   `references`, `calls`) so you can ask "where is `X` defined / who calls it".
   The graph model is already shaped for this.
-- **Name-index content-skipped files** — a binary or over-size file should still
-  be findable by `-f` filename search even though its contents are not indexed
-  (today it is absent from the name index too; see DESIGN §10).
+- ~~**Name-index content-skipped files**~~ — done in 0.2.2 (`-f` finds binaries /
+  over-size paths; content search never opens them).
 - Positional index (store line offsets) to skip re-reading candidates.
 - Worker-thread parallel indexing for large trees.
 - A compact binary index format.

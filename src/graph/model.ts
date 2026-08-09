@@ -20,12 +20,19 @@ import { isCanonicalIndexPath } from "./index-contract.ts";
 
 export type FileId = number;
 
+// Why a file has no content terms. Name-indexed only (DESIGN §10): `-f` can
+// find it; content search must never open it (regex would defeat the size cap
+// and binary-as-utf8 would invent false hits).
+export type ContentSkip = "binary" | "large";
+
 // A file node.
 export interface FileRecord {
   id: FileId;
   path: string; // POSIX-relative to the index root, e.g. "src/cli.ts"
   mtimeMs: number; // change-detection inputs for incremental indexing
   size: number;
+  /** Absent/undefined ⇒ content is indexed. Set ⇒ name-only. */
+  contentSkip?: ContentSkip;
 }
 
 // term -> occurrence count within a single file (the forward edge weight).
@@ -57,11 +64,17 @@ export class SearchGraph {
 
   // Insert or replace a file and its content-term counts, keeping every derived
   // index in sync. Returns the (possibly reused) node id.
+  //
+  // When `contentSkip` is set the file is name-indexed only: `counts` are
+  // ignored (forced empty) so content prune never surfaces it and regex full
+  // scan can filter it out. That is how a binary / over-size path stays
+  // findable by `-f` without reopening the silent-absence hole on content.
   setFile(
     path: string,
     mtimeMs: number,
     size: number,
     counts: TermCounts,
+    contentSkip?: ContentSkip,
   ): FileId {
     if (!isCanonicalIndexPath(path)) {
       throw new Error("MYCO-INDEX-PATH: file path must be canonical and root-relative");
@@ -70,12 +83,16 @@ export class SearchGraph {
     if (existing !== undefined) this.removeFile(path);
 
     const id = this.nextId++;
-    const record: FileRecord = { id, path, mtimeMs, size };
+    // Content-skipped nodes carry no terms — never invent postings for them.
+    const termCounts: TermCounts = contentSkip ? new Map() : counts;
+    const record: FileRecord = contentSkip
+      ? { id, path, mtimeMs, size, contentSkip }
+      : { id, path, mtimeMs, size };
     this.filesById.set(id, record);
     this.idByPath.set(path, id);
-    this.forward.set(id, counts);
+    this.forward.set(id, termCounts);
 
-    for (const [term, count] of counts) {
+    for (const [term, count] of termCounts) {
       let bucket = this.inverted.get(term);
       if (bucket === undefined) {
         bucket = new Map();
@@ -83,9 +100,15 @@ export class SearchGraph {
       }
       bucket.set(id, count);
     }
-    this.edges += counts.size;
+    this.edges += termCounts.size;
     this.indexName(record);
     return id;
+  }
+
+  /** True when content search may open this file (not binary / over-size). */
+  hasContent(id: FileId): boolean {
+    const rec = this.filesById.get(id);
+    return rec !== undefined && rec.contentSkip === undefined;
   }
 
   // Remove a file node and every edge that touched it.

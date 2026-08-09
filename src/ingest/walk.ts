@@ -28,6 +28,12 @@ export interface FileMeta {
   absPath: string;
   mtimeMs: number;
   size: number;
+  /**
+   * When set, the file is still *listed* so the name index can see it, but
+   * content must not be read (DESIGN §10). Still named in `skippedLarge` so the
+   * size-cap remains a loud coverage report.
+   */
+  contentSkip?: "large";
 }
 
 export interface WalkOptions {
@@ -187,6 +193,15 @@ export async function walk(
         }
         if (st.size > opts.maxFileSize) {
           skippedLarge?.push(rel); // a bounded coverage cap must be visible, not silent
+          // Still emit a meta so the indexer can name-index the path (DESIGN §10).
+          // Content is never read for these; contentSkip="large" is the contract.
+          out.push({
+            relPath: rel,
+            absPath: path.join(absDir, ent.name),
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+            contentSkip: "large",
+          });
           continue;
         }
         out.push({

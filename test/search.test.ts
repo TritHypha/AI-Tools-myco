@@ -327,3 +327,93 @@ test("detectRegexIntent: fires on the strong regex signals, quiet on honest lite
     assert.equal(detectRegexIntent(q), false, `should stay quiet: ${q}`);
   }
 });
+
+// DESIGN §10 — content-skipped files stay name-visible (the silent-absence hole).
+test("over-size and binary files are findable by -f and never opened for content", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-nameskip-"));
+  try {
+    await fs.writeFile(path.join(dir, "tiny.txt"), "hello needle here\n");
+    await fs.writeFile(path.join(dir, "huge-blob.bin"), "x".repeat(5000));
+    // NUL in the first bytes ⇒ binary sniff
+    await fs.writeFile(path.join(dir, "photo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]));
+    // Distinctive path tokens for -f
+    await fs.mkdir(path.join(dir, "assets"), { recursive: true });
+    await fs.writeFile(path.join(dir, "assets", "secret-image.dat"), Buffer.from([0, 1, 2, 3, 4]));
+
+    const { graph, stats } = await buildIndex(dir, {
+      maxFileSize: 100, // huge-blob exceeds this
+      useGitignore: false,
+    });
+    assert.ok(stats.skippedLarge >= 1, "control: size cap must fire");
+    assert.ok(stats.skippedBinary >= 1, "control: binary sniff must fire");
+
+    // Name search finds over-size and binary paths.
+    const byName = await search(dir, graph, "huge", {
+      mode: "word",
+      caseSensitive: "smart",
+      files: true,
+      limit: 100,
+      context: 0,
+    });
+    assert.ok(!isError(byName));
+    if (!isError(byName)) {
+      assert.ok(
+        byName.matches.some((m) => m.path.includes("huge-blob")),
+        "over-size path is name-indexed (DESIGN §10)",
+      );
+    }
+    const byBin = await search(dir, graph, "secret", {
+      mode: "word",
+      caseSensitive: "smart",
+      files: true,
+      limit: 100,
+      context: 0,
+    });
+    assert.ok(!isError(byBin));
+    if (!isError(byBin)) {
+      assert.ok(
+        byBin.matches.some((m) => m.path.includes("secret-image")),
+        "binary path is name-indexed (DESIGN §10)",
+      );
+    }
+
+    // Content search for a token that only lives in a tiny text file works.
+    const content = await search(dir, graph, "needle", {
+      mode: "word",
+      caseSensitive: "smart",
+      files: false,
+      limit: 100,
+      context: 0,
+    });
+    assert.ok(!isError(content));
+    if (!isError(content)) {
+      assert.ok(content.matches.some((m) => m.path === "tiny.txt"));
+      // Must not invent content hits inside the binary/over-size nodes.
+      assert.ok(!content.matches.some((m) => m.path.includes("huge-blob")));
+      assert.ok(!content.matches.some((m) => m.path.includes("photo.png")));
+    }
+
+    // Regex full-scan must not open content-skipped files either (size-cap honesty).
+    const recs = [...graph.files()];
+    const skipped = recs.filter((r) => r.contentSkip !== undefined);
+    assert.ok(skipped.length >= 2, "graph retains content-skipped nodes");
+    const regex = await search(dir, graph, "needle", {
+      mode: "regex",
+      caseSensitive: false,
+      files: false,
+      limit: 100,
+      context: 0,
+    });
+    assert.ok(!isError(regex), "regex search must not error on a simple pattern");
+    if (!isError(regex)) {
+      assert.equal(
+        regex.filesSearched,
+        1,
+        "regex full-scan opens only content-indexed files (not binary/over-size)",
+      );
+      assert.ok(regex.matches.every((m) => m.path === "tiny.txt"));
+    }
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

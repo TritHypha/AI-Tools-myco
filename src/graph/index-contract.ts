@@ -19,11 +19,17 @@ export const DEFAULT_INDEX_LIMITS: Readonly<IndexLimits> = Object.freeze({
   maxTermEdges: MAX_INDEX_TERM_EDGES,
 });
 
+/** Optional content-skip tag on a stored file (format 1, additive).
+ *  Absent ⇒ content indexed. `b` binary · `l` over-size. */
+export type StoredContentSkip = "b" | "l";
+
 export interface StoredFile {
   p: string;
   m: number;
   s: number;
   t: Array<[string, number]>;
+  /** Name-only: content was not tokenized (DESIGN §10). */
+  k?: StoredContentSkip;
 }
 
 export interface StoredIndex {
@@ -100,7 +106,6 @@ export function validateStoredIndex(
   for (const candidate of value.files) {
     if (
       !isRecord(candidate)
-      || !hasExactKeys(candidate, ["p", "m", "s", "t"])
       || !isCanonicalIndexPath(candidate.p)
       || typeof candidate.m !== "number"
       || !Number.isFinite(candidate.m)
@@ -113,6 +118,17 @@ export function validateStoredIndex(
       || paths.has(candidate.p)
     ) {
       return null;
+    }
+    // Closed shape: required p/m/s/t; optional k ∈ {b,l} for name-only nodes.
+    // Unknown keys still refuse (hostile cache). Exact {p,m,s,t} remains valid.
+    const keys = Object.keys(candidate).sort().join(",");
+    if (keys !== "m,p,s,t" && keys !== "k,m,p,s,t") return null;
+    let contentSkip: StoredContentSkip | undefined;
+    if (keys === "k,m,p,s,t") {
+      if (candidate.k !== "b" && candidate.k !== "l") return null;
+      contentSkip = candidate.k;
+      // Name-only files must not carry term postings (would re-open content paths).
+      if (candidate.t.length !== 0) return null;
     }
     paths.add(candidate.p);
 
@@ -140,12 +156,14 @@ export function validateStoredIndex(
       if (termEdges > limits.maxTermEdges) return null;
     }
 
-    files.push({
+    const stored: StoredFile = {
       p: candidate.p,
       m: candidate.m,
       s: candidate.s,
       t: storedTerms,
-    });
+    };
+    if (contentSkip) stored.k = contentSkip;
+    files.push(stored);
   }
 
   return {

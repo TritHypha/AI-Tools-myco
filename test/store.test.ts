@@ -116,6 +116,54 @@ test("valid persisted index round-trips through the graph", async () => {
   }
 });
 
+test("name-only content-skip tags round-trip (k=b / k=l) and refuse polluted rows", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "myco-index-skip-"));
+  try {
+    // Valid name-only binary node.
+    await writeIndex(root, {
+      format: 1,
+      createdAt: 1,
+      files: [{ p: "assets/pic.bin", m: 1, s: 99, t: [], k: "b" }],
+    });
+    const loaded = await loadGraph(root);
+    assert.ok(loaded);
+    const rec = [...loaded!.graph.files()][0];
+    assert.equal(rec?.path, "assets/pic.bin");
+    assert.equal(rec?.contentSkip, "binary");
+    assert.equal(loaded!.graph.filesWithTerm("anything"), undefined);
+
+    // Terms on a name-only row are hostile — refuse the whole index.
+    assert.equal(
+      validateStoredIndex({
+        format: 1,
+        createdAt: 1,
+        files: [{ p: "x.bin", m: 1, s: 1, t: [["sneak", 1]], k: "b" }],
+      }),
+      null,
+      "name-only file must not carry term postings",
+    );
+    // Unknown k value refuses.
+    assert.equal(
+      validateStoredIndex({
+        format: 1,
+        createdAt: 1,
+        files: [{ p: "x.bin", m: 1, s: 1, t: [], k: "z" }],
+      }),
+      null,
+    );
+
+    // saveGraph preserves k
+    const g = new SearchGraph();
+    g.setFile("big.dat", 2, 1_000_000, new Map(), "large");
+    await saveGraph(root, g);
+    const again = await loadGraph(root);
+    assert.ok(again);
+    assert.equal([...again!.graph.files()][0]?.contentSkip, "large");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("index collection budgets are enforced by the structural validator", () => {
   assert.equal(
     validateStoredIndex(validIndex(), {

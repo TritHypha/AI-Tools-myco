@@ -95,12 +95,16 @@ export async function saveGraph(
   for (const rec of graph.files()) {
     const counts = graph.forwardOf(rec.id);
     if (!counts) continue;
-    files.push({
+    const stored: StoredFile = {
       p: rec.path,
       m: rec.mtimeMs,
       s: rec.size,
       t: [...counts].sort(([left], [right]) => compareCodeUnits(left, right)),
-    });
+    };
+    // Persist name-only reason so a reload does not re-open content search.
+    if (rec.contentSkip === "binary") stored.k = "b";
+    else if (rec.contentSkip === "large") stored.k = "l";
+    files.push(stored);
   }
   files.sort((left, right) => compareCodeUnits(left.p, right.p));
   const payload: StoredIndex = { format: FORMAT, createdAt: Date.now(), files };
@@ -190,7 +194,8 @@ export async function loadGraphOutcome(
   try {
     for (const f of data.files) {
       const counts: TermCounts = new Map(f.t);
-      graph.setFile(f.p, f.m, f.s, counts);
+      const skip = f.k === "b" ? "binary" as const : f.k === "l" ? "large" as const : undefined;
+      graph.setFile(f.p, f.m, f.s, counts, skip);
     }
   } catch {
     return { status: "rejected" };
