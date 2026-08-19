@@ -21,6 +21,8 @@ import { fileURLToPath } from "node:url";
 import { walk } from "../src/ingest/walk.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER = 4 * 1024 * 1024;
 
 // Infrastructure dirs are the DELIBERATE silent set (walk.ts ALWAYS_SKIP) — excluded from the
 // tracked side too, so the invariant only ever binds the loud-skip contract.
@@ -57,7 +59,12 @@ test("detector self-test: a file on nobody's list IS flagged (non-vacuous by con
 });
 
 test("walk() visits every tracked file or reports why not (the loud-skip contract)", async () => {
-  const tracked = execSync("git ls-files", { cwd: REPO, encoding: "utf8" })
+  const tracked = execSync("git ls-files", {
+    cwd: REPO,
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_MAX_BUFFER,
+  })
     .trim().split(/\r?\n/).filter(Boolean)
     .filter((rel) => existsSync(path.join(REPO, rel))); // staged-deletes can linger in ls-files
   assert.ok(tracked.length >= 20, `control: the repo must actually have tracked files (got ${tracked.length})`);
@@ -79,7 +86,12 @@ test("walk() visits every tracked file or reports why not (the loud-skip contrac
 });
 
 test("a tiny size cap narrows coverage but NEVER silently — every miss lands on the reported list", async () => {
-  const tracked = execSync("git ls-files", { cwd: REPO, encoding: "utf8" })
+  const tracked = execSync("git ls-files", {
+    cwd: REPO,
+    encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_MAX_BUFFER,
+  })
     .trim().split(/\r?\n/).filter(Boolean)
     .filter((rel) => existsSync(path.join(REPO, rel)));
 

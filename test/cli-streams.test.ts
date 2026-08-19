@@ -25,13 +25,27 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, "..", "src", "cli.ts");
+const CLI_TIMEOUT_MS = 30_000;
+const CLI_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
 
 function runCli(args: string[]): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["--experimental-strip-types", CLI, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--experimental-strip-types", CLI, ...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: CLI_TIMEOUT_MS,
+    });
     let out = "", err = "";
-    child.stdout.on("data", (d) => { out += d; });
-    child.stderr.on("data", (d) => { err += d; });
+    let outputBytes = 0;
+    const append = (current: string, chunk: Buffer): string => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > CLI_OUTPUT_LIMIT_BYTES) {
+        child.kill();
+        return current;
+      }
+      return current + chunk.toString("utf8");
+    };
+    child.stdout.on("data", (d: Buffer) => { out = append(out, d); });
+    child.stderr.on("data", (d: Buffer) => { err = append(err, d); });
     child.on("exit", (code) => resolve({ code: code ?? -1, out, err }));
   });
 }

@@ -11,6 +11,7 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const testDir = path.join(here, "..", "test");
+const TEST_SUITE_TIMEOUT_MS = 10 * 60 * 1000;
 
 const files = readdirSync(testDir)
   .filter((f) => f.endsWith(".test.ts"))
@@ -24,6 +25,6 @@ if (files.length === 0) {
 const result = spawnSync(
   process.execPath,
   ["--experimental-strip-types", "--test", ...files],
-  { stdio: "inherit" },
+  { stdio: "inherit", timeout: TEST_SUITE_TIMEOUT_MS },
 );
 process.exit(result.status ?? 1);

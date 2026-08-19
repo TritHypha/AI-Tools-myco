@@ -14,6 +14,7 @@ import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, "..", "src", "cli.ts");
+const CLI_TIMEOUT_MS = 30_000;
 
 test("CLI exits 0 when the stdout pipe closes early (no EPIPE crash)", async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "myco-epipe-"));
@@ -26,7 +27,7 @@ test("CLI exits 0 when the stdout pipe closes early (no EPIPE crash)", async () 
       const child = spawn(
         process.execPath,
         ["--experimental-strip-types", CLI, "-s", "needle", dir, "--no-color", "--no-gitignore"],
-        { stdio: ["ignore", "pipe", "ignore"] },
+        { stdio: ["ignore", "pipe", "ignore"], timeout: CLI_TIMEOUT_MS },
       );
       let closed = false;
       child.stdout.on("data", () => {
