@@ -74,6 +74,8 @@ stores absolute paths (see §8).
 3. **Binary sniff** (`binary.ts`) — a NUL byte in the first 8 KB ⇒ skip (the same
    heuristic git uses).
 4. **Tokenize** (`tokenize.ts`) — split on Unicode word runs, case-fold, count.
+   A term of at most 4,096 UTF-16 code units is admitted. Longer terms are
+   omitted without truncation and counted on the file record.
 5. **Update graph** — `setFile()` replaces the node and patches every derived
    edge; vanished files are dropped.
 
@@ -94,6 +96,9 @@ Two phases:
    - *substring*: for each token, union of every dictionary term that contains it,
      then intersect across tokens (still index-driven).
    - *regex*: no reliable prune → scan all indexed files (documented cost).
+   - *omission fallback*: word/substring modes union every file marked with an
+     overlong-term omission into the candidate set. This bounded direct scan is
+     required because the omitted term edge cannot safely prove non-membership.
 2. **Verify** — read only the candidate files and confirm real matches. Word and
    substring modes use the local precise matcher. Raw regex operations execute in
    a killable worker with a per-operation deadline, plus whole-search and input
@@ -148,6 +153,9 @@ myco reads files and writes only `./.myco/`. Notable choices:
   bounded bytes/files/term edges, canonical non-empty POSIX-relative paths,
   positive counts and unique file/term identities. Windows/POSIX absolute,
   backslash, empty, dot and parent segments refuse the complete index.
+- **The writer validates before writing.** A programmatic graph that violates
+  the reader contract is refused before `.myco/index.json` is created or
+  replaced; the cache cannot knowingly poison its next read.
 - **Containment is re-derived.** A symlinked `.myco` directory whose real index
   resolves outside the search root refuses. `SearchGraph.setFile()` repeats the
   canonical-path invariant so a programmatic graph cannot bypass the loader.
@@ -162,6 +170,11 @@ myco reads files and writes only `./.myco/`. Notable choices:
   named one-per-line by `myco index`, and flagged with a one-line note on the
   search path (stderr only, so piped/JSON stdout stays clean). A bounded
   coverage cap that hides what it dropped turns "no matches" into a lie.
+- **Overlong terms are explicit, not truncated.** The persisted file marker
+  carries a positive bounded omission count, `index` names affected relative
+  paths, and `status` reports aggregate counts without term bodies. Content
+  search directly verifies marked files, preserving completeness while keeping
+  the term graph within its reader limit.
 - Regex is user-supplied. Known catastrophic shapes are statically refused; all
   accepted JavaScript regex operations run in an isolated worker that is
   terminated on deadline. This contains a stalled engine call but does not make

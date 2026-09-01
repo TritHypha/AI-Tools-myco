@@ -13,6 +13,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import {
+  DEFAULT_INDEX_LIMITS,
   MAX_INDEX_BYTES,
   MAX_INDEX_TERM_EDGES,
   validateStoredIndex,
@@ -29,6 +30,8 @@ export interface IndexMeta {
   createdAt: number;
   fileCount: number;
   termCount: number;
+  omittedOverlongTerms: number;
+  filesWithOmittedOverlongTerms: number;
 }
 
 export interface LoadGraphOptions {
@@ -70,7 +73,8 @@ function compareCodeUnits(left: string, right: string): number {
 // means the graph is larger than the reader will ever accept back.
 export type SaveOutcome =
   | { written: true }
-  | { written: false; reason: "term-edge-ceiling"; edges: number; limit: number };
+  | { written: false; reason: "term-edge-ceiling"; edges: number; limit: number }
+  | { written: false; reason: "invalid-payload" };
 
 // Write the graph to <root>/.myco/index.json (creating the dir if needed).
 //
@@ -104,13 +108,21 @@ export async function saveGraph(
     // Persist name-only reason so a reload does not re-open content search.
     if (rec.contentSkip === "binary") stored.k = "b";
     else if (rec.contentSkip === "large") stored.k = "l";
+    else if (rec.omittedOverlongTerms) stored.o = rec.omittedOverlongTerms;
     files.push(stored);
   }
   files.sort((left, right) => compareCodeUnits(left.p, right.p));
   const payload: StoredIndex = { format: FORMAT, createdAt: Date.now(), files };
+  const validated = validateStoredIndex(payload, {
+    ...DEFAULT_INDEX_LIMITS,
+    maxTermEdges: limit,
+  });
+  if (validated === null) {
+    return { written: false, reason: "invalid-payload" };
+  }
   const dir = path.join(root, INDEX_DIR);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(indexPath(root), JSON.stringify(payload), "utf8");
+  await fs.writeFile(indexPath(root), JSON.stringify(validated), "utf8");
   return { written: true };
 }
 
@@ -195,7 +207,7 @@ export async function loadGraphOutcome(
     for (const f of data.files) {
       const counts: TermCounts = new Map(f.t);
       const skip = f.k === "b" ? "binary" as const : f.k === "l" ? "large" as const : undefined;
-      graph.setFile(f.p, f.m, f.s, counts, skip);
+      graph.setFile(f.p, f.m, f.s, counts, skip, f.o ?? 0);
     }
   } catch {
     return { status: "rejected" };
@@ -207,6 +219,8 @@ export async function loadGraphOutcome(
       createdAt: data.createdAt,
       fileCount: graph.fileCount(),
       termCount: graph.termCount(),
+      omittedOverlongTerms: data.files.reduce((sum, file) => sum + (file.o ?? 0), 0),
+      filesWithOmittedOverlongTerms: data.files.filter((file) => (file.o ?? 0) > 0).length,
     },
   };
 }

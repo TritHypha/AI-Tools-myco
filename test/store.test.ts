@@ -4,7 +4,11 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { validateStoredIndex } from "../src/graph/index-contract.ts";
+import {
+  MAX_INDEX_TERM_LENGTH,
+  MAX_INDEX_TERMS_PER_FILE,
+  validateStoredIndex,
+} from "../src/graph/index-contract.ts";
 import { SearchGraph } from "../src/graph/model.ts";
 import { loadGraph, saveGraph } from "../src/graph/store.ts";
 
@@ -79,6 +83,24 @@ test("persisted index has a closed bounded record shape", async (t) => {
       })],
       ["unexpected file field", validIndex({
         files: [{ p: "src/a.ts", m: 1, s: 3, t: [["alpha", 1]], allow: true }],
+      })],
+      ["zero omitted-term count", validIndex({
+        files: [{ p: "src/a.ts", m: 1, s: 3, t: [["alpha", 1]], o: 0 }],
+      })],
+      ["fractional omitted-term count", validIndex({
+        files: [{ p: "src/a.ts", m: 1, s: 3, t: [["alpha", 1]], o: 1.5 }],
+      })],
+      ["excessive omitted-term count", validIndex({
+        files: [{
+          p: "src/a.ts",
+          m: 1,
+          s: 3,
+          t: [["alpha", 1]],
+          o: MAX_INDEX_TERMS_PER_FILE + 1,
+        }],
+      })],
+      ["content-skip and omission marker combined", validIndex({
+        files: [{ p: "src/a.ts", m: 1, s: 3, t: [], k: "b", o: 1 }],
       })],
       ["Windows absolute path", validIndex({
         files: [{ p: "C:/secret.txt", m: 1, s: 3, t: [["alpha", 1]] }],
@@ -221,6 +243,29 @@ test("programmatic graph construction repeats the canonical path gate", () => {
     () => graph.setFile("../outside.txt", 1, 1, new Map([["needle", 1]])),
     /MYCO-INDEX-PATH/,
   );
+});
+
+test("saveGraph refuses a programmatic overlong term without writing a poisoned cache", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "myco-index-overlong-"));
+  try {
+    const graph = new SearchGraph();
+    graph.setFile(
+      "a.txt",
+      1,
+      1,
+      new Map([["x".repeat(MAX_INDEX_TERM_LENGTH + 1), 1]]),
+    );
+
+    const outcome = await saveGraph(root, graph);
+
+    assert.deepEqual(outcome, { written: false, reason: "invalid-payload" });
+    assert.equal(
+      await fs.stat(path.join(root, ".myco", "index.json")).catch(() => undefined),
+      undefined,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("saved index ordering is canonical apart from observational createdAt", async () => {

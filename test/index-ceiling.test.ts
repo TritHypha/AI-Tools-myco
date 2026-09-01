@@ -13,7 +13,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { MAX_INDEX_TERM_EDGES } from "../src/graph/index-contract.ts";
+import {
+  MAX_INDEX_TERM_EDGES,
+  MAX_INDEX_TERM_LENGTH,
+} from "../src/graph/index-contract.ts";
 import { SearchGraph } from "../src/graph/model.ts";
 import {
   clampTermEdgeCeiling,
@@ -172,4 +175,26 @@ test("CONTROL: the same tree indexes cleanly under a ceiling that fits", async (
   const built = await buildIndex(root, { ...DEFAULT_INDEX_OPTIONS, maxTermEdges: 100 });
   assert.equal(built.stats.files, 2);
   assert.equal(built.saved.written, true);
+});
+
+test("buildIndex persists a searchable marker when overlong terms are omitted", async () => {
+  const root = await tempRoot();
+  const overlong = "x".repeat(MAX_INDEX_TERM_LENGTH + 1);
+  await fs.writeFile(path.join(root, "a.txt"), `keep ${overlong}`, "utf8");
+
+  const built = await buildIndex(root, DEFAULT_INDEX_OPTIONS);
+
+  assert.equal(built.saved.written, true);
+  assert.equal(built.stats.omittedOverlongTerms, 1);
+  assert.equal(built.stats.filesWithOmittedOverlongTerms, 1);
+  assert.deepEqual(built.omittedOverlongTermPaths, ["a.txt"]);
+  assert.equal(built.graph.filesWithTerm("keep")?.size, 1);
+  assert.equal(built.graph.fileByPath("a.txt")?.omittedOverlongTerms, 1);
+
+  const loaded = await loadGraphOutcome(root);
+  assert.equal(loaded.status, "ok");
+  if (loaded.status !== "ok") throw new Error("unreachable — narrowing for types");
+  assert.equal(loaded.graph.fileByPath("a.txt")?.omittedOverlongTerms, 1);
+  assert.equal(loaded.meta.omittedOverlongTerms, 1);
+  assert.equal(loaded.meta.filesWithOmittedOverlongTerms, 1);
 });

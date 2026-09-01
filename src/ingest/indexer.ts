@@ -31,6 +31,8 @@ export interface IndexStats {
   skippedBinary: number; // detected as binary and skipped
   skippedLarge: number; // skipped for exceeding maxFileSize (reported, never silent)
   skippedVendored: number; // vendored dirs (node_modules) pruned by default (reported, never silent)
+  omittedOverlongTerms: number; // overlong token occurrences omitted from term edges
+  filesWithOmittedOverlongTerms: number; // files retained with omission metadata
 }
 
 export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
@@ -47,6 +49,7 @@ export async function buildIndex(
   saved: SaveOutcome; // whether the cache actually persisted, and why not
   skippedLargePaths: string[];
   skippedVendoredDirs: string[];
+  omittedOverlongTermPaths: string[];
 }> {
   const prior = await loadGraph(root);
   const graph = prior?.graph ?? new SearchGraph();
@@ -61,6 +64,8 @@ export async function buildIndex(
     skippedBinary: 0,
     skippedLarge: 0,
     skippedVendored: 0,
+    omittedOverlongTerms: 0,
+    filesWithOmittedOverlongTerms: 0,
   };
 
   const skippedLargePaths: string[] = [];
@@ -120,7 +125,15 @@ export async function buildIndex(
       continue;
     }
 
-    graph.setFile(meta.relPath, meta.mtimeMs, meta.size, countTerms(buf.toString("utf8")));
+    const tokenizeReport = { omittedOverlongTerms: 0 };
+    graph.setFile(
+      meta.relPath,
+      meta.mtimeMs,
+      meta.size,
+      countTerms(buf.toString("utf8"), tokenizeReport),
+      undefined,
+      tokenizeReport.omittedOverlongTerms,
+    );
     if (existing) stats.updated++;
     else stats.added++;
 
@@ -153,9 +166,23 @@ export async function buildIndex(
   stats.skippedLarge = skippedLargePaths.length;
   stats.skippedVendored = skippedVendoredDirs.length;
   stats.files = graph.fileCount();
+  const omittedOverlongTermPaths = [...graph.files()]
+    .filter((file) => (file.omittedOverlongTerms ?? 0) > 0)
+    .map((file) => file.path)
+    .sort();
+  stats.filesWithOmittedOverlongTerms = omittedOverlongTermPaths.length;
+  stats.omittedOverlongTerms = [...graph.files()]
+    .reduce((sum, file) => sum + (file.omittedOverlongTerms ?? 0), 0);
   // The save may decline (see saveGraph). Hand the outcome back rather than
   // discarding it: a cache that did not persist is a fact the caller must be
   // able to report, otherwise the next run repeats the work with no explanation.
   const saved = await saveGraph(root, graph, { maxTermEdges: termEdgeCeiling });
-  return { graph, stats, saved, skippedLargePaths, skippedVendoredDirs };
+  return {
+    graph,
+    stats,
+    saved,
+    skippedLargePaths,
+    skippedVendoredDirs,
+    omittedOverlongTermPaths,
+  };
 }

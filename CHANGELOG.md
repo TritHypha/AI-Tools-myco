@@ -12,6 +12,19 @@ that the silence was the defect, not the narrowing.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An index produced by Myco no longer becomes unreadable when source contains
+  a term above the reader's 4,096-code-unit limit.** Exact-limit terms remain
+  indexed; longer terms are omitted without truncation, with a persisted bounded
+  count on each affected file. Word and substring searches directly verify
+  marked files, so omission cannot create a false negative. `index` names the
+  affected root-relative paths and `status` reports aggregate counts without
+  disclosing term bodies.
+- Validate the complete generated payload with the reader's closed contract
+  before writing. A programmatic overlong term now returns an explicit
+  `invalid-payload` refusal and cannot create a poisoned cache.
+
 ## [0.2.2]
 
 ### Fixed

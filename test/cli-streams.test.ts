@@ -116,3 +116,35 @@ test("an incomplete regex result exits 2 even though diagnostic evidence is retu
     assert.match(r.out, /exceeded its deadline and was terminated/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("index and status disclose overlong-term omissions without exposing term bodies", async () => {
+  const dir = fixture();
+  const overlong = `${"a".repeat(2050)}hiddenneedle${"b".repeat(2050)}`;
+  writeFileSync(path.join(dir, "overlong.txt"), `${overlong}\nkeep\n`);
+  try {
+    const indexed = await runCli(["index", dir, "--no-color", "--no-gitignore"]);
+    assert.equal(indexed.code, 0, `index should succeed with a searchable omission marker; err=${indexed.err}`);
+    assert.equal(indexed.err, "", "successful omission reporting belongs on stdout");
+    assert.match(indexed.out, /1 overlong term\(s\) omitted from the term graph in 1 file\(s\)/);
+    assert.match(indexed.out, /overlong\.txt/);
+    assert.doesNotMatch(indexed.out, new RegExp(overlong), "the omitted term body must not be disclosed");
+
+    const status = await runCli(["status", dir, "--no-color"]);
+    assert.equal(status.code, 0, `the saved index must remain readable; err=${status.err}`);
+    assert.equal(status.err, "");
+    assert.match(status.out, /omitted overlong terms:\s+1/);
+    assert.match(status.out, /files requiring direct verification:\s+1/);
+    assert.doesNotMatch(status.out, new RegExp(overlong), "status must report aggregate metadata only");
+
+    const searched = await runCli([
+      "-s",
+      "hiddenneedle",
+      dir,
+      "--no-refresh",
+      "--no-color",
+      "--no-gitignore",
+    ]);
+    assert.equal(searched.code, 0, `persisted omission metadata must recover the match; err=${searched.err}`);
+    assert.match(searched.out, /overlong\.txt/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

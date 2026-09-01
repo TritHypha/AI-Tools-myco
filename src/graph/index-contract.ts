@@ -30,6 +30,8 @@ export interface StoredFile {
   t: Array<[string, number]>;
   /** Name-only: content was not tokenized (DESIGN §10). */
   k?: StoredContentSkip;
+  /** Count of overlong terms omitted while retaining other searchable terms. */
+  o?: number;
 }
 
 export interface StoredIndex {
@@ -122,13 +124,22 @@ export function validateStoredIndex(
     // Closed shape: required p/m/s/t; optional k ∈ {b,l} for name-only nodes.
     // Unknown keys still refuse (hostile cache). Exact {p,m,s,t} remains valid.
     const keys = Object.keys(candidate).sort().join(",");
-    if (keys !== "m,p,s,t" && keys !== "k,m,p,s,t") return null;
+    if (keys !== "m,p,s,t" && keys !== "k,m,p,s,t" && keys !== "m,o,p,s,t") return null;
     let contentSkip: StoredContentSkip | undefined;
     if (keys === "k,m,p,s,t") {
       if (candidate.k !== "b" && candidate.k !== "l") return null;
       contentSkip = candidate.k;
       // Name-only files must not carry term postings (would re-open content paths).
       if (candidate.t.length !== 0) return null;
+    }
+    let omittedOverlongTerms: number | undefined;
+    if (keys === "m,o,p,s,t") {
+      if (
+        !Number.isSafeInteger(candidate.o)
+        || (candidate.o as number) <= 0
+        || (candidate.o as number) > MAX_INDEX_TERMS_PER_FILE
+      ) return null;
+      omittedOverlongTerms = candidate.o as number;
     }
     paths.add(candidate.p);
 
@@ -163,6 +174,7 @@ export function validateStoredIndex(
       t: storedTerms,
     };
     if (contentSkip) stored.k = contentSkip;
+    if (omittedOverlongTerms) stored.o = omittedOverlongTerms;
     files.push(stored);
   }
 

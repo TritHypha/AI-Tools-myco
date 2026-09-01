@@ -33,6 +33,8 @@ export interface FileRecord {
   size: number;
   /** Absent/undefined ⇒ content is indexed. Set ⇒ name-only. */
   contentSkip?: ContentSkip;
+  /** Count of overlong content terms omitted from the persisted term graph. */
+  omittedOverlongTerms?: number;
 }
 
 // term -> occurrence count within a single file (the forward edge weight).
@@ -75,9 +77,17 @@ export class SearchGraph {
     size: number,
     counts: TermCounts,
     contentSkip?: ContentSkip,
+    omittedOverlongTerms = 0,
   ): FileId {
     if (!isCanonicalIndexPath(path)) {
       throw new Error("MYCO-INDEX-PATH: file path must be canonical and root-relative");
+    }
+    if (
+      !Number.isSafeInteger(omittedOverlongTerms)
+      || omittedOverlongTerms < 0
+      || (contentSkip !== undefined && omittedOverlongTerms !== 0)
+    ) {
+      throw new Error("MYCO-INDEX-OMISSION: omitted-term count is invalid");
     }
     const existing = this.idByPath.get(path);
     if (existing !== undefined) this.removeFile(path);
@@ -87,7 +97,9 @@ export class SearchGraph {
     const termCounts: TermCounts = contentSkip ? new Map() : counts;
     const record: FileRecord = contentSkip
       ? { id, path, mtimeMs, size, contentSkip }
-      : { id, path, mtimeMs, size };
+      : omittedOverlongTerms > 0
+        ? { id, path, mtimeMs, size, omittedOverlongTerms }
+        : { id, path, mtimeMs, size };
     this.filesById.set(id, record);
     this.idByPath.set(path, id);
     this.forward.set(id, termCounts);

@@ -62,7 +62,9 @@ rule as the over-size skip note: **a coverage cap is never a silent one.**
 ## Features
 
 - **Graph index** — files and terms are nodes; `file --contains--> term` are
-  edges. A query looks up the term node and walks to its files. No full scan.
+  edges. A query looks up the term node and walks to its files. Files carrying
+  an explicitly recorded overlong-term omission are also directly verified, so
+  the bounded graph cannot turn an omitted edge into a false absence.
 - **Whole-word by default** — token-aware matching. `-s` for substring, `-e` for
   regex when you need them.
 - **Smart-case** — lower-case query ⇒ case-insensitive; add a capital ⇒
@@ -146,6 +148,13 @@ Two phases, and that is the whole performance story:
 2. **Verify** — read only those candidate files and confirm real matches with a
    precise matcher (word boundary / substring / regex).
 
+Terms up to and including 4,096 UTF-16 code units are admitted to the graph.
+Longer terms are omitted rather than truncated. The index records the omission
+count on the affected file, and word/substring searches add every such file to
+the direct-verification set. `myco index` names the affected root-relative paths;
+`myco status` reports aggregate counts. Neither command prints omitted term
+bodies.
+
 The index lives in `.myco/index.json` at the root you search. Only the *forward*
 index (each file → its term counts) is written; the inverted and filename
 indexes are rebuilt in memory on load, which is what makes incremental
@@ -154,7 +163,9 @@ collections, requires a closed record shape and canonical root-relative paths,
 rejects duplicate identities, and refuses a symlinked index that resolves
 outside the root. See [DESIGN.md](DESIGN.md) for the full model.
 
-The writer and reader enforce the same fixed term-edge ceiling. A root that is
+The writer validates the complete payload against the same closed, bounded
+contract as the reader before writing. They enforce the same fixed term-edge
+ceiling and term-length limit. A root that is
 too broad exits with `MYCO-INDEX-TOO-LARGE` and asks for a narrower root instead
 of writing a cache that can never be read back. `myco status` distinguishes “no
 index exists” from “an index exists but was refused”; only an `ENOENT`

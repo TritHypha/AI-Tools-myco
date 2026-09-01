@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { countTerms } from "../src/ingest/tokenize.ts";
 import { foldCase } from "../src/util/normalize.ts";
+import { MAX_INDEX_TERM_LENGTH } from "../src/graph/index-contract.ts";
 
 test("countTerms folds case and counts occurrences", () => {
   const counts = countTerms("Hello hello HELLO world");
@@ -28,4 +29,18 @@ test("countTerms handles Unicode letters", () => {
   assert.equal(counts.get("naïve"), 1);
   assert.equal(counts.get("café"), 1);
   assert.equal(counts.get("ω_omega"), 1);
+});
+
+test("countTerms admits the exact term limit and omits longer terms without truncation", () => {
+  const admitted = "a".repeat(MAX_INDEX_TERM_LENGTH);
+  const omitted = "b".repeat(MAX_INDEX_TERM_LENGTH + 1);
+  const report = { omittedOverlongTerms: 0 };
+
+  const counts = countTerms(`${admitted} ${omitted} keep`, report);
+
+  assert.equal(counts.get(admitted), 1);
+  assert.equal(counts.get(omitted), undefined);
+  assert.equal(counts.get(omitted.slice(0, MAX_INDEX_TERM_LENGTH)), undefined);
+  assert.equal(counts.get("keep"), 1);
+  assert.equal(report.omittedOverlongTerms, 1);
 });
