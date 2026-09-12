@@ -29,8 +29,10 @@ export const MAX_REPETITION = 1000;
  *  rare pathological single line, e.g. a minified blob, within an allowed file.) */
 export const MAX_REGEX_LINE_LEN = 200_000;
 
-/** Wall-clock ceiling for one search's verify phase; exceeded => stop + truncate. */
-export const SEARCH_TIME_BUDGET_MS = 5_000;
+/** Wall-clock ceiling for one search's verify phase; exceeded => stop + truncate.
+ *  Large documentation corpora need more than the former five-second budget.
+ *  This does not extend the isolated regex operation deadline below. */
+export const SEARCH_TIME_BUDGET_MS = 120_000;
 
 /** Hard deadline for one isolated RegExp operation. The worker is terminated. */
 export const REGEX_OPERATION_TIME_BUDGET_MS = 250;
