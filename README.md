@@ -59,6 +59,15 @@ Zero hits there is *correct* — a whole-word pattern has to end at a boundary �
 you should never have to guess whether zero means "absent" or "filtered". Same
 rule as the over-size skip note: **a coverage cap is never a silent one.**
 
+## Search time budget
+
+The search verification phase has a **120-second** wall-clock budget (previously
+five seconds), allowing broader documentation-corpus searches to finish.
+This is not an overall CLI deadline: index loading, rebuilding and refresh are
+separate. A single isolated regex operation still has a **250 ms** deadline;
+pattern refusal, line/file-size limits and result caps are unchanged.
+Reaching a limit still reports incomplete coverage, never a verified absence.
+
 ## Features
 
 - **Graph index** — files and terms are nodes; `file --contains--> term` are
