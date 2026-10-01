@@ -14,12 +14,11 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import {
-  MAX_INDEX_TERM_EDGES,
   MAX_INDEX_TERM_LENGTH,
+  validateStoredIndex,
 } from "../src/graph/index-contract.ts";
 import { SearchGraph } from "../src/graph/model.ts";
 import {
-  clampTermEdgeCeiling,
   INDEX_DIR,
   INDEX_FILE,
   loadGraphOutcome,
@@ -60,45 +59,47 @@ test("termEdgeCount tracks forward edges across add, replace and remove", () => 
   assert.equal(graph.termEdgeCount(), 0);
 });
 
-test("a caller cannot RAISE the term-edge ceiling, only tighten it", () => {
-  assert.equal(clampTermEdgeCeiling(undefined), MAX_INDEX_TERM_EDGES);
-  assert.equal(clampTermEdgeCeiling(10), 10);
-  // The whole point: an attempt to lift the contract limit is clamped back down,
-  // so no writer can put a file on disk that the reader is obliged to reject.
-  assert.equal(clampTermEdgeCeiling(MAX_INDEX_TERM_EDGES * 10), MAX_INDEX_TERM_EDGES);
-  assert.equal(clampTermEdgeCeiling(-1), MAX_INDEX_TERM_EDGES);
-  assert.equal(clampTermEdgeCeiling(1.5), MAX_INDEX_TERM_EDGES);
+test("stored-index validation has no fixed aggregate file or term-edge ceiling", () => {
+  const files = Array.from({ length: 250_001 }, (_unused, index) => ({
+    p: `file-${index}.txt`,
+    m: 1,
+    s: 0,
+    t: [],
+  }));
+  const manyFiles = validateStoredIndex({ format: 1, createdAt: 1, files });
+  assert.equal(manyFiles?.files.length, 250_001);
+
+  const terms = Array.from({ length: 100_000 }, (_unused, index) => [`term-${index}`, 1] as [string, number]);
+  const manyEdges = validateStoredIndex({
+    format: 1,
+    createdAt: 1,
+    files: Array.from({ length: 21 }, (_unused, index) => ({
+      p: `edge-${index}.txt`,
+      m: 1,
+      s: 0,
+      t: terms,
+    })),
+  });
+  assert.equal(manyEdges?.files.length, 21);
+  assert.equal(manyEdges?.files.reduce((sum, file) => sum + file.t.length, 0), 2_100_000);
 });
 
-test("saveGraph DECLINES to write an index the reader would refuse, and writes no file", async () => {
+test("saveGraph persists and reloads more than the historical aggregate edge ceiling", async () => {
   const root = await tempRoot();
-  const graph = graphWithEdges(12);
+  const graph = new SearchGraph();
+  const terms = new Map<string, number>();
+  for (let index = 0; index < 100_000; index += 1) terms.set(`term-${index}`, 1);
+  for (let index = 0; index < 21; index += 1) {
+    graph.setFile(`edge-${index}.txt`, 1, 0, terms);
+  }
 
-  const outcome = await saveGraph(root, graph, { maxTermEdges: 5 });
-  assert.equal(outcome.written, false);
-  if (outcome.written) throw new Error("unreachable — narrowing for types");
-  assert.equal(outcome.reason, "term-edge-ceiling");
-  assert.equal(outcome.edges, 12);
-  assert.equal(outcome.limit, 5);
-
-  // No poisoned artifact left behind: the refusal must not create a file that a
-  // later run would read, reject, and rewrite.
-  const onDisk = await fs
-    .stat(path.join(root, INDEX_DIR, INDEX_FILE))
-    .catch(() => undefined);
-  assert.equal(onDisk, undefined, "a declined save must leave no index file");
-});
-
-test("CONTROL: the same save succeeds when the graph is within the ceiling", async () => {
-  // Without this row the test above would pass even if saveGraph were broken
-  // into never writing anything — it must exercise the axis that distinguishes
-  // refusal from failure.
-  const root = await tempRoot();
-  const outcome = await saveGraph(root, graphWithEdges(3), { maxTermEdges: 5 });
-  assert.equal(outcome.written, true);
-
-  const onDisk = await fs.stat(path.join(root, INDEX_DIR, INDEX_FILE));
-  assert.ok(onDisk.isFile(), "a permitted save must write the index");
+  const saved = await saveGraph(root, graph);
+  assert.deepEqual(saved, { written: true });
+  const loaded = await loadGraphOutcome(root);
+  assert.equal(loaded.status, "ok");
+  if (loaded.status !== "ok") throw new Error("unreachable — narrowing for types");
+  assert.equal(loaded.meta.termCount, 100_000);
+  assert.equal(loaded.graph.termEdgeCount(), 2_100_000);
 });
 
 test("loadGraphOutcome tells ABSENT apart from REJECTED", async () => {
@@ -112,9 +113,8 @@ test("loadGraphOutcome tells ABSENT apart from REJECTED", async () => {
   await fs.writeFile(path.join(root, INDEX_DIR, INDEX_FILE), "{ not json", "utf8");
   assert.equal((await loadGraphOutcome(root)).status, "rejected");
 
-  // An index over a collection budget is likewise refused, not absent — this is
-  // the exact shape of the 40 MB GitHub-root index that triggered the defect.
-  const overLimit = {
+  // A structurally invalid index is refused, not absent.
+  const invalidIndex = {
     format: 1,
     createdAt: 1,
     files: [
@@ -126,13 +126,30 @@ test("loadGraphOutcome tells ABSENT apart from REJECTED", async () => {
       },
     ],
   };
+  invalidIndex.files[0].t[0][1] = 0;
   await fs.writeFile(
     path.join(root, INDEX_DIR, INDEX_FILE),
-    JSON.stringify(overLimit),
+    JSON.stringify(invalidIndex),
     "utf8",
   );
-  const refused = await loadGraphOutcome(root, { maxIndexBytes: 8 });
-  assert.equal(refused.status, "rejected", "an over-size index is refused, not absent");
+  invalidIndex.files[0].t[0][1] = 0;
+  const refused = await loadGraphOutcome(root);
+  assert.equal(refused.status, "rejected", "a malformed index is refused, not absent");
+});
+
+test("loadGraphOutcome reads a valid index beyond the historical 64 MiB ceiling", async () => {
+  const root = await tempRoot();
+  await fs.mkdir(path.join(root, INDEX_DIR), { recursive: true });
+  const payload = JSON.stringify({
+    format: 1,
+    createdAt: 1,
+    files: [{ p: "a.txt", m: 1, s: 1, t: [] }],
+  });
+  const paddingBytes = 64 * 1024 * 1024 + 1;
+  await fs.writeFile(path.join(root, INDEX_DIR, INDEX_FILE), `${" ".repeat(paddingBytes)}${payload}`, "utf8");
+
+  const loaded = await loadGraphOutcome(root);
+  assert.equal(loaded.status, "ok");
 });
 
 test("loadGraphOutcome treats a non-ENOENT filesystem failure as REJECTED", async () => {
@@ -150,29 +167,24 @@ test("CONTROL: a well-formed index loads as ok", async () => {
   assert.equal(outcome.status, "ok");
 });
 
-test("buildIndex REFUSES a tree past the ceiling instead of building what cannot be saved", async () => {
+test("buildIndex accepts a tree beyond a caller's former aggregate ceiling", async () => {
   const root = await tempRoot();
   // Two files whose combined distinct terms exceed the tightened ceiling.
   await fs.writeFile(path.join(root, "a.txt"), "alpha bravo charlie delta", "utf8");
   await fs.writeFile(path.join(root, "b.txt"), "echo foxtrot golf hotel", "utf8");
 
-  await assert.rejects(
-    () => buildIndex(root, { ...DEFAULT_INDEX_OPTIONS, maxTermEdges: 3 }),
-    (err: Error) => {
-      assert.match(err.message, /MYCO-INDEX-TOO-LARGE/);
-      // The message must name the remedy, not just the failure.
-      assert.match(err.message, /narrower root/);
-      return true;
-    },
-  );
+  const built = await buildIndex(root, DEFAULT_INDEX_OPTIONS);
+  assert.equal(built.stats.files, 2);
+  assert.equal(built.graph.termEdgeCount(), 8);
+  assert.deepEqual(built.saved, { written: true });
 });
 
-test("CONTROL: the same tree indexes cleanly under a ceiling that fits", async () => {
+test("CONTROL: a normal tree still indexes cleanly", async () => {
   const root = await tempRoot();
   await fs.writeFile(path.join(root, "a.txt"), "alpha bravo charlie delta", "utf8");
   await fs.writeFile(path.join(root, "b.txt"), "echo foxtrot golf hotel", "utf8");
 
-  const built = await buildIndex(root, { ...DEFAULT_INDEX_OPTIONS, maxTermEdges: 100 });
+  const built = await buildIndex(root, DEFAULT_INDEX_OPTIONS);
   assert.equal(built.stats.files, 2);
   assert.equal(built.saved.written, true);
 });

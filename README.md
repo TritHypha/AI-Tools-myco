@@ -167,18 +167,18 @@ bodies.
 The index lives in `.myco/index.json` at the root you search. Only the *forward*
 index (each file → its term counts) is written; the inverted and filename
 indexes are rebuilt in memory on load, which is what makes incremental
-re-indexing cheap. The file is untrusted input: Myco bounds its bytes and
-collections, requires a closed record shape and canonical root-relative paths,
-rejects duplicate identities, and refuses a symlinked index that resolves
-outside the root. See [DESIGN.md](DESIGN.md) for the full model.
+re-indexing cheap. There is no fixed whole-root file-count, term-edge, or index
+byte ceiling. The closed record contract still bounds each path, each term, and
+the number of terms stored for one file; the OS can still fail a read, write,
+or allocation when resources are exhausted. The file is untrusted input:
+Myco requires canonical root-relative paths, rejects duplicate identities, and
+refuses a symlinked index that resolves outside the root. See
+[DESIGN.md](DESIGN.md) for the full model.
 
-The writer validates the complete payload against the same closed, bounded
-contract as the reader before writing. They enforce the same fixed term-edge
-ceiling and term-length limit. A root that is
-too broad exits with `MYCO-INDEX-TOO-LARGE` and asks for a narrower root instead
-of writing a cache that can never be read back. `myco status` distinguishes “no
-index exists” from “an index exists but was refused”; only an `ENOENT`
-filesystem result means absent. Permission, invalid-path and other I/O failures
+The writer validates the complete payload against the same structural contract
+as the reader before writing. `myco status` distinguishes “no index exists”
+from “an index exists but was refused”; only an `ENOENT` filesystem result
+means absent. Permission, invalid-path, malformed-data and other I/O failures
 are refused rather than treated as a first run.
 
 ## Honest performance notes

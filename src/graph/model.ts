@@ -182,9 +182,7 @@ export class SearchGraph {
     return this.inverted.size;
   }
 
-  // Total forward (file -> term) edges — the quantity MAX_INDEX_TERM_EDGES
-  // bounds. O(1) so an indexer can check the ceiling after every file rather
-  // than discovering it only once the graph is already too big to hold.
+  // Total forward (file -> term) edges, maintained for metrics and tests.
   termEdgeCount(): number {
     return this.edges;
   }

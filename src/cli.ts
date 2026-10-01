@@ -162,23 +162,13 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   return 0;
 }
 
-// A cache that declined to persist must be reported wherever indexing happens.
-// Silence here is what turns one refusal into an unbounded repeat: the work is
-// redone on every invocation and the user is never told there is a ceiling to
-// act on. Informational → stdout; the search itself still succeeded.
+// A structurally invalid generated payload must be reported if it could not be
+// persisted. Informational → stdout; the search itself still succeeded.
 function noteSaveOutcome(saved: SaveOutcome): void {
   if (saved.written) return;
-  if (saved.reason === "invalid-payload") {
-    process.stdout.write(
-      "myco: note — index NOT cached: generated graph violates the stored-index contract. "
-        + "Results are correct, but the cache was refused before writing.\n",
-    );
-    return;
-  }
   process.stdout.write(
-    `myco: note — index NOT cached: ${saved.edges.toLocaleString()} term edges `
-      + `exceeds the ${saved.limit.toLocaleString()} ceiling. Results are correct, `
-      + `but every run re-indexes from scratch. Index a narrower root to restore caching.\n`,
+    "myco: note — index NOT cached: generated graph violates the stored-index contract. "
+      + "Results are correct, but the cache was refused before writing.\n",
   );
 }
 
@@ -191,7 +181,7 @@ async function cmdStatus(root: string): Promise<number> {
     process.stderr.write(
       outcome.status === "rejected"
         ? `index at ${path.join(root, ".myco")} exists but was REFUSED `
-          + `(over a contract limit, corrupt, or an incompatible format) — `
+          + `(malformed or incompatible format) — `
           + `delete it and run: myco index\n`
         : `no index at ${path.join(root, ".myco")} — run: myco index\n`,
     );
@@ -289,13 +279,13 @@ async function cmdSearch(
       graph = loaded.graph;
     } else {
       // Say WHICH of the two reasons applies. Reporting a refused index as a
-      // "first run" is how an over-ceiling cache stayed invisible: the message
+      // "first run" is how a rejected cache stayed invisible: the message
       // was reassuring, identical every time, and pointed at nothing to fix.
       const prior = await loadGraphOutcome(root);
       if (prior.status === "rejected") {
         process.stdout.write(
           `myco: existing index at ${path.join(path.resolve(root), ".myco")} was REFUSED `
-            + `(over a contract limit, corrupt, or an incompatible format) — re-indexing…\n`,
+            + `(malformed or incompatible format) — re-indexing…\n`,
         );
       } else if (prior.status === "absent") {
         // Informational note → stdout (stderr is errors only).
