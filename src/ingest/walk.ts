@@ -7,7 +7,8 @@
 // Ignore handling is a *practical subset* of .gitignore, chosen to be
 // predictable rather than bug-for-bug compatible (see DESIGN.md):
 //   - a pattern with no "/"     -> basename glob, matched at any depth
-//   - a pattern containing "/"  -> path prefix, anchored at the root
+//   - a leading "/"             -> anchored to the ignore file's directory
+//   - another pattern containing "/" -> path prefix, anchored at that directory
 //   - a trailing "/"            -> directory-only
 //   - a leading "!"             -> negate (un-ignore); last match wins
 //   - "*" and "?" are globs; "**" and other advanced forms are NOT supported.
@@ -82,7 +83,8 @@ function parseIgnore(text: string, base: string): Rule[] {
     if (negate) body = body.slice(1);
     const dirOnly = body.endsWith("/");
     if (dirOnly) body = body.slice(0, -1);
-    if (body.startsWith("/")) body = body.slice(1);
+    const anchored = body.startsWith("/");
+    if (anchored) body = body.slice(1);
     // A leading `**/` means "at any depth" — strip it so the remainder matches by
     // basename (git's very common `**/build/`, `**/.fungi-cache/`, `**/node_modules/`
     // idiom). This is the one `**` form worth honouring; deeper mid-path `**` stays
@@ -90,7 +92,7 @@ function parseIgnore(text: string, base: string): Rule[] {
     // a correct .gitignore already excluded (owner 2026-07-25, the .fungi-cache case).
     if (body.startsWith("**/")) body = body.slice(3);
     if (body === "") continue;
-    const basename = !body.includes("/");
+    const basename = !anchored && !body.includes("/");
     rules.push({ re: globToRegExp(body), dirOnly, negate, basename, base });
   }
   return rules;

@@ -38,6 +38,28 @@ test("walk honours .mycoignore basename globs and directory rules", async () => 
   }
 });
 
+test("walk keeps leading-slash ignore patterns anchored to the ignore file directory", async () => {
+  const dir = await tmpTree({
+    ".gitignore": "/HANDOVER-*.md\n",
+    "HANDOVER-root.md": "ignored at root",
+    "docs/handover/HANDOVER-index.md": "kept in nested directory",
+    "docs/handover/keep.md": "ordinary nested file",
+  });
+  try {
+    const rels = new Set(
+      (await walk(dir, { maxFileSize: 1 << 20, useGitignore: true })).map((m) => m.relPath),
+    );
+    assert.ok(!rels.has("HANDOVER-root.md"), "root-anchored pattern applies at the root");
+    assert.ok(
+      rels.has("docs/handover/HANDOVER-index.md"),
+      "leading slash must not turn a root-only pattern into a basename glob at any depth",
+    );
+    assert.ok(rels.has("docs/handover/keep.md"), "unmatched nested files remain visible");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("walk honours NESTED .gitignore, scoped to its own subtree (the dss-host /target class)", async () => {
   const dir = await tmpTree({
     // a subproject with its OWN .gitignore ignoring its build output
