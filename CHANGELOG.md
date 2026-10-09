@@ -12,6 +12,13 @@ that the silence was the defect, not the narrowing.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in foreground `links watch`: bounded local-document path detection,
+  event acceleration, periodic full reconciliation, and independent
+  `myco.links.v1` snapshots for advisory consumers such as Hypha.
+  Unknown coverage is explicit; no search-index integration or auto-start.
+
 ### Fixed
 
 - **An index produced by Myco no longer becomes unreadable when source contains

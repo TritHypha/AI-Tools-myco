@@ -24,6 +24,7 @@ import { search, searchFile, isError, detectRegexIntent } from "./query/search.t
 import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts";
 import { render, summaryLine } from "./output.ts";
 import { VERSION } from "./index.ts";
+import { linksCommand } from "./links.ts";
 
 const HELP = `myco ${VERSION} — grep, but it grows a graph.
 
@@ -32,6 +33,7 @@ USAGE
   myco search <pattern> [path] explicit search (when pattern is a command name)
   myco index [path]            build/refresh the graph index
   myco status [path]           show index statistics
+  myco links watch <root> --snapshot <file>   foreground link monitor (links --help)
 
 MATCHING
   (default)        whole-word match  (search "cat" ignores "concatenate")
@@ -341,6 +343,7 @@ async function cmdSearch(
 }
 
 async function run(argv: string[]): Promise<number> {
+  if (argv[0] === 'links') return linksCommand(argv.slice(1));
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,

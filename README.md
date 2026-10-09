@@ -247,3 +247,9 @@ Contributions are accepted under the same licence (Apache-2.0 §5): you keep you
 copyright, and you grant the project the licence in the file. There is no CLA.
 
 Copyright 2026 Phillip Booth.
+## Opt-in local-link monitoring
+
+Run `myco links watch <root> --snapshot <outside-root-directory>/links.json`
+to monitor supported Markdown/text paths, including fragile Temp references.
+It runs in the foreground until Ctrl+C; no startup installation occurs.
+See [the scope, limits and snapshot contract](docs/LINK-MONITOR.md).
