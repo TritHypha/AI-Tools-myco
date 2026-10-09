@@ -1,6 +1,13 @@
 # build output
 dist/
 
+# test-created scratch directories
+/test/.link-monitor-verification/
+/test/.links-*/
+/test/myco-ceiling-*/
+/test/myco-pathfilter-*/
+/test/node-compile-cache/
+
 # dependencies
 node_modules/
 
