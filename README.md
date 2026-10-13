@@ -127,6 +127,13 @@ myco index [path]            build / refresh the graph index
 myco status [path]           show index statistics
 ```
 
+`myco status` reports **unique content terms** (case-folded vocabulary entries,
+not token occurrences) separately from **file-term links** (distinct file/term
+pairs; repeated appearances in one file count once). Filename/path tokens use a
+separate name index and are not included in the content-term total. Overlong
+content terms omitted from the graph are reported separately. These are index
+statistics, not document counts, verified facts, or a measure of corpus coverage.
+
 | Flag | Meaning |
 |---|---|
 | `-s, --substring` | match anywhere in a word (grep-like) |
@@ -147,6 +154,25 @@ Exit codes: `0` matches found · `1` no matches · `2` error or incomplete
 coverage. Regex timeout, whole-search timeout, and regex line-cap truncation
 are incomplete and therefore fail closed with `2`; JSON still carries the
 partial evidence and exact reason.
+
+## Git worktree-aware search
+
+For a Git repository with linked worktrees, use the shared AGENTS coordinator rather
+than reusing one Myco index across different checkouts. From the AGENTS checkout:
+
+```bash
+node tools/myco-hypha-worktree-scan.mjs myco <repository> --query <literal> --current-worktree-only --format text
+node tools/myco-hypha-worktree-scan.mjs myco <repository> --query <literal> --include-worktrees --format json
+```
+
+The coordinator records each registered worktree's branch or detached state, HEAD,
+lock and dirty-state identity alongside bounded Myco findings. It invokes Myco with
+`--no-refresh`: results do not refresh or mix indexes, and a zero-result query is
+`UNKNOWN`, not proof that a term is absent. It never checks out branches or changes
+Git state. The tool and its limits are maintained in the sibling AGENTS repository
+at `tools/myco-hypha-worktree-scan.mjs`; see that tool's README entry for the full
+report contract. This integration is an operator workflow, not part of the published
+Myco package or a guarantee that every worktree has a fresh index.
 
 ## How it works
 

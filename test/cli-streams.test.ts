@@ -148,3 +148,19 @@ test("index and status disclose overlong-term omissions without exposing term bo
     assert.match(searched.out, /overlong\.txt/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("status distinguishes unique content vocabulary from file-term links", async () => {
+  const dir = fixture();
+  writeFileSync(path.join(dir, "f.ts"), ""); // fixture path tokens must not affect content-term metrics
+  writeFileSync(path.join(dir, "alpha.txt"), "Echo echo echo delta\n");
+  writeFileSync(path.join(dir, "beta.md"), "ECHO gamma\n");
+  try {
+    const indexed = await runCli(["index", dir, "--no-color", "--no-gitignore"]);
+    assert.equal(indexed.code, 0, indexed.err);
+
+    const status = await runCli(["status", dir, "--no-color"]);
+    assert.equal(status.code, 0, status.err);
+    assert.match(status.out, /unique content terms:\s+3 \(case-folded; not occurrences; path-name terms are separate\)/);
+    assert.match(status.out, /file-term links:\s+4 \(distinct file\/term pairs; repeats in one file count once\)/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

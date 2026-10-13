@@ -199,7 +199,8 @@ async function cmdStatus(root: string): Promise<number> {
   const when = new Date(loaded.meta.createdAt).toISOString();
   process.stdout.write(
     `files:  ${loaded.meta.fileCount}\n` +
-      `terms:  ${loaded.meta.termCount}\n` +
+      `unique content terms:  ${loaded.meta.termCount} (case-folded; not occurrences; path-name terms are separate)\n` +
+      `file-term links:  ${loaded.graph.termEdgeCount()} (distinct file/term pairs; repeats in one file count once)\n` +
       `omitted overlong terms:  ${loaded.meta.omittedOverlongTerms}\n` +
       `files requiring direct verification:  ${loaded.meta.filesWithOmittedOverlongTerms}\n` +
       `index:  ${(bytes / 1024).toFixed(1)} KiB\n` +
