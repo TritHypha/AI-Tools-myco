@@ -18,6 +18,10 @@ that the silence was the defect, not the narrowing.
   event acceleration, periodic full reconciliation, and independent
   `myco.links.v1` snapshots for advisory consumers such as Hypha.
   Unknown coverage is explicit; no search-index integration or auto-start.
+- Over-size files are persisted as typed INDEXED_UNKNOWN marker nodes (`u` on
+  `k:"l"`). Search JSON carries `unknown[]` and `complete`; `--json` no longer
+  hides the skip. Optional `--hash-oversize` stream-hashes skipped files
+  (never tokenized). Legacy `k:"l"` rows load as UNKNOWN `NOT_RECORDED`.
 
 ### Fixed
 

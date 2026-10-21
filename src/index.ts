@@ -4,7 +4,7 @@
 // without touching the CLI. The CLI (cli.ts) is a thin layer over exactly this.
 
 export { SearchGraph, nameTermsOf } from "./graph/model.ts";
-export type { FileId, FileRecord, TermCounts, ContentSkip } from "./graph/model.ts";
+export type { FileId, FileRecord, TermCounts, ContentSkip, UnknownMarker } from "./graph/model.ts";
 
 export { loadGraph, saveGraph, INDEX_DIR, INDEX_FILE } from "./graph/store.ts";
 export type { IndexMeta } from "./graph/store.ts";
@@ -27,6 +27,7 @@ export type {
   SearchResult,
   SearchError,
   SearchOutcome,
+  UnknownSearchHit,
 } from "./query/search.ts";
 
 // Scoping (`--in`). Exported because the CLI is meant to be a thin layer over this

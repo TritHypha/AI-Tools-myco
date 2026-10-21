@@ -219,6 +219,16 @@ forward/inverted split already supports adding a second edge type.
   `contentSkip` tag (`binary` | `large`). `-f` finds them; content search
   (including regex full-scan) never opens them. Persisted as optional `k: "b"|"l"`
   on the file record; unknown keys still refuse.
+- **Over-size files are INDEXED_UNKNOWN marker nodes.** Skipping the bytes is
+  allowed; omitting the node is not. Each over-size file is a graph node with
+  `unknown: { type: "UNKNOWN", state: "INDEXED_UNKNOWN", reason: "OVERSIZE",
+  thresholdBytes, sha256? }`. Consumers MUST treat it as unknown content, never
+  as "no content" or absence. Persisted as additive `u` on `k:"l"` (format stays
+  1). Legacy `k:"l"` rows without `u` load as UNKNOWN with
+  `thresholdBytes: "NOT_RECORDED"`. Search results carry `unknown[]` and
+  `complete: false` whenever any such node is in scope. Optional
+  `--hash-oversize` stream-hashes the bytes (never tokenized); a hash error
+  leaves the marker without `sha256` and never drops the node.
 
 ## 11. Testing
 

@@ -16,6 +16,14 @@ export const DEFAULT_INDEX_LIMITS: Readonly<IndexLimits> = Object.freeze({
  *  Absent ⇒ content indexed. `b` binary · `l` over-size. */
 export type StoredContentSkip = "b" | "l";
 
+/** Over-size marker (only with k:"l"): state is always INDEXED_UNKNOWN. */
+export interface StoredUnknown {
+  st: "INDEXED_UNKNOWN";
+  r: "OVERSIZE";
+  th: number;
+  h?: string;
+}
+
 export interface StoredFile {
   p: string;
   m: number;
@@ -25,6 +33,8 @@ export interface StoredFile {
   k?: StoredContentSkip;
   /** Count of overlong terms omitted while retaining other searchable terms. */
   o?: number;
+  /** Over-size marker (only with k:"l"): state is always INDEXED_UNKNOWN. */
+  u?: StoredUnknown;
 }
 
 export interface StoredIndex {
@@ -105,12 +115,40 @@ export function validateStoredIndex(
     ) {
       return null;
     }
-    // Closed shape: required p/m/s/t; optional k ∈ {b,l} for name-only nodes.
-    // Unknown keys still refuse (hostile cache). Exact {p,m,s,t} remains valid.
+    // Closed shape: required p/m/s/t; optional k ∈ {b,l} for name-only nodes;
+    // optional u only with k:"l". Unknown keys still refuse (hostile cache).
     const keys = Object.keys(candidate).sort().join(",");
-    if (keys !== "m,p,s,t" && keys !== "k,m,p,s,t" && keys !== "m,o,p,s,t") return null;
+    if (
+      keys !== "m,p,s,t"
+      && keys !== "k,m,p,s,t"
+      && keys !== "k,m,p,s,t,u"
+      && keys !== "m,o,p,s,t"
+    ) return null;
     let contentSkip: StoredContentSkip | undefined;
-    if (keys === "k,m,p,s,t") {
+    let storedUnknown: StoredUnknown | undefined;
+    if (keys === "k,m,p,s,t,u") {
+      const raw = candidate.u;
+      if (
+        candidate.k !== "l"
+        || !isRecord(raw)
+        || Array.isArray(raw)
+      ) return null;
+      const uKeys = Object.keys(raw).sort().join(",");
+      const expectKeys = raw.h === undefined ? "r,st,th" : "h,r,st,th";
+      if (
+        uKeys !== expectKeys
+        || raw.st !== "INDEXED_UNKNOWN"
+        || raw.r !== "OVERSIZE"
+        || !Number.isSafeInteger(raw.th)
+        || (raw.th as number) <= 0
+        || candidate.s <= (raw.th as number)
+        || (raw.h !== undefined && (typeof raw.h !== "string" || !/^[0-9a-f]{64}$/.test(raw.h)))
+      ) return null;
+      storedUnknown = raw.h === undefined
+        ? { st: "INDEXED_UNKNOWN", r: "OVERSIZE", th: raw.th as number }
+        : { st: "INDEXED_UNKNOWN", r: "OVERSIZE", th: raw.th as number, h: raw.h };
+    }
+    if (keys === "k,m,p,s,t" || keys === "k,m,p,s,t,u") {
       if (candidate.k !== "b" && candidate.k !== "l") return null;
       contentSkip = candidate.k;
       // Name-only files must not carry term postings (would re-open content paths).
@@ -157,6 +195,7 @@ export function validateStoredIndex(
     };
     if (contentSkip) stored.k = contentSkip;
     if (omittedOverlongTerms) stored.o = omittedOverlongTerms;
+    if (keys === "k,m,p,s,t,u" && storedUnknown) stored.u = storedUnknown;
     files.push(stored);
   }
 

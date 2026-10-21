@@ -13,7 +13,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import type { FileId, SearchGraph } from "../graph/model.ts";
+import type { FileId, SearchGraph, UnknownMarker } from "../graph/model.ts";
 import { foldCase, hasUpper, wordScanner } from "../util/normalize.ts";
 import { applyPathFilter, type PathFilter } from "./path-filter.ts";
 import { RegexExecutor } from "./regex-executor.ts";
@@ -82,6 +82,20 @@ export interface SearchResult {
   // absence. Tested against the WHOLE index, not just this query's candidates: a
   // query that legitimately finds nothing in a valid scope must NOT raise this.
   pathFilterMatchedNothing: boolean;
+  /** INDEXED_UNKNOWN over-size nodes in scope. Never treat as absence. */
+  unknown: UnknownSearchHit[];
+  /** Fail-closed: false whenever unknown is non-empty or coverage is incomplete. */
+  complete: boolean;
+}
+
+export interface UnknownSearchHit {
+  path: string;
+  size: number;
+  type: "UNKNOWN";
+  state: "INDEXED_UNKNOWN";
+  reason: "OVERSIZE";
+  thresholdBytes: number | "NOT_RECORDED";
+  sha256?: string;
 }
 
 export interface SearchError {
@@ -92,6 +106,68 @@ export type SearchOutcome = SearchResult | SearchError;
 
 export function isError(o: SearchOutcome): o is SearchError {
   return (o as SearchError).error !== undefined;
+}
+
+function scopedUnknown(
+  graph: SearchGraph,
+  pathFilter?: PathFilter,
+): UnknownSearchHit[] {
+  const { kept } = applyPathFilter(graph.unknownFiles(), pathFilter);
+  const out: UnknownSearchHit[] = [];
+  for (const rec of kept) {
+    const marker: UnknownMarker | undefined = rec.unknown;
+    if (rec.contentSkip !== "large" || marker === undefined) {
+      throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+    }
+    const hit: UnknownSearchHit = {
+      path: rec.path,
+      size: rec.size,
+      type: marker.type,
+      state: marker.state,
+      reason: marker.reason,
+      thresholdBytes: marker.thresholdBytes,
+    };
+    if (marker.sha256 !== undefined) hit.sha256 = marker.sha256;
+    out.push(hit);
+  }
+  return out;
+}
+
+function resultComplete(
+  unknown: UnknownSearchHit[],
+  flags: {
+    searchTimeBudgetExceeded: boolean;
+    regexTimedOut: boolean;
+    regexLinesTruncated: number;
+  },
+): boolean {
+  return unknown.length === 0
+    && !flags.searchTimeBudgetExceeded
+    && !flags.regexTimedOut
+    && flags.regexLinesTruncated === 0;
+}
+
+function withUnknown(
+  graph: SearchGraph,
+  pathFilter: PathFilter | undefined,
+  base: Omit<SearchResult, "unknown" | "complete">,
+): SearchResult {
+  const unknown = scopedUnknown(graph, pathFilter);
+  return {
+    ...base,
+    unknown,
+    complete: resultComplete(unknown, base),
+  };
+}
+
+function emptyUnknownResult(
+  base: Omit<SearchResult, "unknown" | "complete">,
+): SearchResult {
+  return {
+    ...base,
+    unknown: [],
+    complete: resultComplete([], base),
+  };
 }
 
 function escapeRegExp(s: string): string {
@@ -396,7 +472,7 @@ function searchNames(
         : 1,
   );
   const matched = new Set(ranked.map((m) => m.path)).size;
-  return {
+  return withUnknown(graph, pathFilter, {
     matches: ranked.slice(0, limit),
     filesSearched: searched,
     filesMatched: matched,
@@ -411,7 +487,7 @@ function searchNames(
     // Name search already covers the whole index, so "kept nothing" IS "matched
     // nothing anywhere" — no second pass needed to tell the two apart.
     pathFilterMatchedNothing: pathFilter !== undefined && kept.length === 0,
-  };
+  });
 }
 
 async function searchNamesRegex(
@@ -469,7 +545,7 @@ async function searchNamesRegex(
         ? -1
         : 1,
   );
-  return {
+  return withUnknown(graph, pathFilter, {
     matches: ranked.slice(0, limit),
     filesSearched: searched,
     filesMatched: new Set(ranked.map((m) => m.path)).size,
@@ -482,7 +558,7 @@ async function searchNamesRegex(
     prunedToZero: false,
     pathFilterExcluded: filtered,
     pathFilterMatchedNothing: pathFilter !== undefined && kept.length === 0,
-  };
+  });
 }
 
 export async function search(
@@ -639,7 +715,7 @@ export async function search(
 
   const ranked = rank(all);
   resultLimitExceeded ||= ranked.length > opts.limit;
-  return {
+  return withUnknown(graph, opts.pathFilter, {
     matches: ranked.slice(0, opts.limit),
     filesSearched: searched,
     filesMatched: filesMatched.size,
@@ -662,7 +738,7 @@ export async function search(
     prunedToZero: ids !== null && unfiltered.length === 0,
     pathFilterExcluded: pathExcluded,
     pathFilterMatchedNothing: filterMatchedNothing,
-  };
+  });
 }
 
 // Search a SINGLE file directly, with NO index — used when the path argument is a
@@ -694,7 +770,7 @@ export async function searchFile(
     const hits = scanLine(rel, matcher).map((h) => ({
       path: rel, line: 0, col: h.col, length: h.length, text: rel, before: [], after: [],
     }));
-    return {
+    return emptyUnknownResult({
       matches: hits.slice(0, opts.limit),
       filesSearched: 1,
       filesMatched: hits.length > 0 ? 1 : 0,
@@ -709,7 +785,7 @@ export async function searchFile(
       // refuses the combination rather than silently ignoring the flag.
       pathFilterExcluded: 0,
       pathFilterMatchedNothing: false,
-    };
+    });
   }
 
   let hits: Match[];
@@ -742,7 +818,7 @@ export async function searchFile(
   }
   const ranked = rank(hits);
   resultLimitExceeded ||= ranked.length > opts.limit;
-  return {
+  return emptyUnknownResult({
     matches: ranked.slice(0, opts.limit),
     filesSearched: 1,
     filesMatched: hits.length > 0 ? 1 : 0,
@@ -755,5 +831,5 @@ export async function searchFile(
     prunedToZero: false, // single-file search has no index to prune
     pathFilterExcluded: 0,
     pathFilterMatchedNothing: false,
-  };
+  });
 }

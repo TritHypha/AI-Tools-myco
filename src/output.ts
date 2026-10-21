@@ -121,6 +121,8 @@ export function render(
           length: m.length,
           text: m.text,
         })),
+        unknown: result.unknown,
+        complete: result.complete,
         summary: {
           filesSearched: result.filesSearched,
           filesMatched: result.filesMatched,
@@ -193,6 +195,17 @@ export function summaryLine(result: SearchResult): string {
   // "it is not here". Those are opposite conclusions from identical output.
   if (result.pathFilterMatchedNothing) {
     bits.push("⚠ --in matched NO indexed path — the scope is empty, so this zero says nothing about the tree (check the glob; paths are root-relative)");
+  }
+  if (result.unknown.length > 0) {
+    const n = result.unknown.length;
+    const paths = result.unknown.map((u) => u.path).join(", ");
+    const recorded = result.unknown.find((u) => u.thresholdBytes !== "NOT_RECORDED");
+    const th = recorded && typeof recorded.thresholdBytes === "number"
+      ? ` > ${(recorded.thresholdBytes / (1024 * 1024)).toFixed(0)} MiB`
+      : "";
+    bits.push(
+      `[incomplete — ${n} file(s) INDEXED_UNKNOWN (OVERSIZE${th}): ${paths}]`,
+    );
   }
   return bits.join(" · ");
 }

@@ -19,7 +19,7 @@ import {
 } from "./index-contract.ts";
 import type { StoredFile, StoredIndex } from "./index-contract.ts";
 import { SearchGraph } from "./model.ts";
-import type { TermCounts } from "./model.ts";
+import type { TermCounts, UnknownMarker } from "./model.ts";
 
 const FORMAT = 1;
 export const INDEX_DIR = ".myco";
@@ -64,9 +64,44 @@ export async function saveGraph(
       t: [...counts].sort(([left], [right]) => compareCodeUnits(left, right)),
     };
     // Persist name-only reason so a reload does not re-open content search.
-    if (rec.contentSkip === "binary") stored.k = "b";
-    else if (rec.contentSkip === "large") stored.k = "l";
-    else if (rec.omittedOverlongTerms) stored.o = rec.omittedOverlongTerms;
+    if (rec.contentSkip === "binary") {
+      if (rec.unknown !== undefined) {
+        throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+      }
+      stored.k = "b";
+    } else if (rec.contentSkip === "large") {
+      const marker = rec.unknown;
+      if (
+        marker === undefined
+        || marker.type !== "UNKNOWN"
+        || marker.state !== "INDEXED_UNKNOWN"
+        || marker.reason !== "OVERSIZE"
+      ) {
+        throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+      }
+      stored.k = "l";
+      if (marker.thresholdBytes !== "NOT_RECORDED") {
+        if (
+          !Number.isSafeInteger(marker.thresholdBytes)
+          || marker.thresholdBytes <= 0
+          || rec.size <= marker.thresholdBytes
+        ) {
+          throw new Error("MYCO-INDEX-UNKNOWN: invalid oversize threshold");
+        }
+        stored.u = {
+          st: "INDEXED_UNKNOWN",
+          r: "OVERSIZE",
+          th: marker.thresholdBytes,
+          ...(marker.sha256 ? { h: marker.sha256 } : {}),
+        };
+      }
+    } else if (rec.contentSkip !== undefined) {
+      throw new Error("MYCO-INDEX-UNKNOWN: unlisted contentSkip");
+    } else if (rec.unknown !== undefined) {
+      throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+    } else if (rec.omittedOverlongTerms) {
+      stored.o = rec.omittedOverlongTerms;
+    }
     files.push(stored);
   }
   files.sort((left, right) => compareCodeUnits(left.p, right.p));
@@ -165,8 +200,24 @@ export async function loadGraphOutcome(
   try {
     for (const f of data.files) {
       const counts: TermCounts = new Map(f.t);
-      const skip = f.k === "b" ? "binary" as const : f.k === "l" ? "large" as const : undefined;
-      graph.setFile(f.p, f.m, f.s, counts, skip, f.o ?? 0);
+      let skip: "binary" | "large" | undefined;
+      let unknown: UnknownMarker | undefined;
+      if (f.k === "b") {
+        skip = "binary";
+      } else if (f.k === "l") {
+        skip = "large";
+        // legacy k:"l" without u loads as UNKNOWN with thresholdBytes "NOT_RECORDED"
+        unknown = {
+          type: "UNKNOWN",
+          state: "INDEXED_UNKNOWN",
+          reason: "OVERSIZE",
+          thresholdBytes: f.u?.th ?? "NOT_RECORDED",
+          ...(f.u?.h ? { sha256: f.u.h } : {}),
+        };
+      } else if (f.k !== undefined) {
+        throw new Error("MYCO-INDEX-UNKNOWN: unlisted k");
+      }
+      graph.setFile(f.p, f.m, f.s, counts, skip, f.o ?? 0, unknown);
     }
   } catch {
     return { status: "rejected" };

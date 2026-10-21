@@ -25,6 +25,15 @@ export type FileId = number;
 // and binary-as-utf8 would invent false hits).
 export type ContentSkip = "binary" | "large";
 
+/** Fail-closed marker: the file EXISTS but its content is UNKNOWN. Never "no content". */
+export interface UnknownMarker {
+  type: "UNKNOWN";
+  state: "INDEXED_UNKNOWN";
+  reason: "OVERSIZE";
+  thresholdBytes: number | "NOT_RECORDED";
+  sha256?: string;
+}
+
 // A file node.
 export interface FileRecord {
   id: FileId;
@@ -33,6 +42,8 @@ export interface FileRecord {
   size: number;
   /** Absent/undefined ⇒ content is indexed. Set ⇒ name-only. */
   contentSkip?: ContentSkip;
+  /** Present iff contentSkip === "large". Consumers MUST treat as unknown, not empty. */
+  unknown?: UnknownMarker;
   /** Count of overlong content terms omitted from the persisted term graph. */
   omittedOverlongTerms?: number;
 }
@@ -78,9 +89,29 @@ export class SearchGraph {
     counts: TermCounts,
     contentSkip?: ContentSkip,
     omittedOverlongTerms = 0,
+    unknown?: UnknownMarker,
   ): FileId {
     if (!isCanonicalIndexPath(path)) {
       throw new Error("MYCO-INDEX-PATH: file path must be canonical and root-relative");
+    }
+    if ((contentSkip === "large") !== (unknown !== undefined)) {
+      throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+    }
+    if (contentSkip !== undefined && contentSkip !== "binary" && contentSkip !== "large") {
+      throw new Error("MYCO-INDEX-UNKNOWN: unlisted contentSkip");
+    }
+    if (unknown !== undefined) {
+      if (
+        unknown.type !== "UNKNOWN"
+        || unknown.state !== "INDEXED_UNKNOWN"
+        || unknown.reason !== "OVERSIZE"
+        || (
+          unknown.thresholdBytes !== "NOT_RECORDED"
+          && (!Number.isSafeInteger(unknown.thresholdBytes) || unknown.thresholdBytes <= 0)
+        )
+      ) {
+        throw new Error("MYCO-INDEX-UNKNOWN: marker shape refused");
+      }
     }
     if (
       !Number.isSafeInteger(omittedOverlongTerms)
@@ -96,7 +127,9 @@ export class SearchGraph {
     // Content-skipped nodes carry no terms — never invent postings for them.
     const termCounts: TermCounts = contentSkip ? new Map() : counts;
     const record: FileRecord = contentSkip
-      ? { id, path, mtimeMs, size, contentSkip }
+      ? (unknown
+        ? { id, path, mtimeMs, size, contentSkip, unknown }
+        : { id, path, mtimeMs, size, contentSkip })
       : omittedOverlongTerms > 0
         ? { id, path, mtimeMs, size, omittedOverlongTerms }
         : { id, path, mtimeMs, size };
@@ -172,6 +205,24 @@ export class SearchGraph {
 
   files(): IterableIterator<FileRecord> {
     return this.filesById.values();
+  }
+
+  /** All INDEXED_UNKNOWN markers, so queries can report them. */
+  unknownFiles(): FileRecord[] {
+    const out: FileRecord[] = [];
+    for (const rec of this.filesById.values()) {
+      if (rec.contentSkip === "large") {
+        if (rec.unknown === undefined) {
+          throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+        }
+        out.push(rec);
+      } else if (rec.unknown !== undefined) {
+        throw new Error("MYCO-INDEX-UNKNOWN: marker iff over-size node");
+      } else if (rec.contentSkip !== undefined && rec.contentSkip !== "binary") {
+        throw new Error("MYCO-INDEX-UNKNOWN: unlisted contentSkip");
+      }
+    }
+    return out;
   }
 
   fileCount(): number {

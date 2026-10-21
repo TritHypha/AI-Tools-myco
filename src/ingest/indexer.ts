@@ -5,9 +5,12 @@
 // size changed. Unchanged files reuse their stored term counts; vanished files
 // are dropped. That is what makes a re-index after editing one file nearly free.
 
-import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, promises as fs } from "node:fs";
+import { pipeline } from "node:stream/promises";
 
 import { SearchGraph } from "../graph/model.ts";
+import type { UnknownMarker } from "../graph/model.ts";
 import { loadGraph, saveGraph } from "../graph/store.ts";
 import type { SaveOutcome } from "../graph/store.ts";
 import { looksBinary } from "../util/binary.ts";
@@ -18,6 +21,8 @@ export interface IndexOptions {
   maxFileSize: number;
   useGitignore: boolean;
   includeVendored?: boolean; // descend into node_modules (default false; skips reported)
+  /** Stream-hash over-size files (bounded streamed read, never tokenized). Default false. */
+  hashOversize?: boolean;
 }
 
 export interface IndexStats {
@@ -36,7 +41,30 @@ export interface IndexStats {
 export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
   maxFileSize: 5 * 1024 * 1024,
   useGitignore: true,
+  hashOversize: false,
 };
+
+async function streamSha256(absPath: string): Promise<string | undefined> {
+  try {
+    const hash = createHash("sha256");
+    await pipeline(createReadStream(absPath), hash);
+    return hash.digest("hex");
+  } catch {
+    // Read error leaves the marker without sha256. Never drop the node.
+    return undefined;
+  }
+}
+
+function oversizeMarker(thresholdBytes: number, sha256?: string): UnknownMarker {
+  const marker: UnknownMarker = {
+    type: "UNKNOWN",
+    state: "INDEXED_UNKNOWN",
+    reason: "OVERSIZE",
+    thresholdBytes,
+  };
+  if (sha256 !== undefined) marker.sha256 = sha256;
+  return marker;
+}
 
 export async function buildIndex(
   root: string,
@@ -82,7 +110,12 @@ export async function buildIndex(
       existing.mtimeMs === meta.mtimeMs &&
       existing.size === meta.size
     ) {
-      if (wantLarge && existing.contentSkip === "large") {
+      if (
+        wantLarge
+        && existing.contentSkip === "large"
+        && existing.unknown?.thresholdBytes === opts.maxFileSize
+        && (!opts.hashOversize || existing.unknown?.sha256 !== undefined)
+      ) {
         stats.unchanged++;
         continue;
       }
@@ -101,7 +134,16 @@ export async function buildIndex(
 
     // Over-size: name-index only, never open the file (DESIGN §10).
     if (wantLarge) {
-      graph.setFile(meta.relPath, meta.mtimeMs, meta.size, new Map(), "large");
+      const sha256 = opts.hashOversize ? await streamSha256(meta.absPath) : undefined;
+      graph.setFile(
+        meta.relPath,
+        meta.mtimeMs,
+        meta.size,
+        new Map(),
+        "large",
+        0,
+        oversizeMarker(opts.maxFileSize, sha256),
+      );
       if (existing) stats.updated++;
       else stats.added++;
       continue;

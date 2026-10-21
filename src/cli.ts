@@ -65,6 +65,7 @@ INDEXING
       --no-refresh    search the existing index without refreshing first
       --no-gitignore  do not honour .gitignore
       --max-size N    skip files larger than N megabytes (default 5)
+      --hash-oversize stream-hash over-size files (default off; never tokenized)
       --vendored      descend into vendored deps (node_modules; skipped + reported by default)
 
 Exit codes: 0 = matches, 1 = no matches, 2 = error.`;
@@ -99,6 +100,7 @@ function toOptions(values: Record<string, unknown>): {
         : DEFAULT_INDEX_OPTIONS.maxFileSize,
       useGitignore: !values["no-gitignore"],
       includeVendored: Boolean(values["vendored"]),
+      hashOversize: Boolean(values["hash-oversize"]),
     },
   };
 }
@@ -300,7 +302,7 @@ async function cmdSearch(
       // Surface an over-size skip even on the search path — otherwise an oversized file
       // silently misses and a zero-result reads as "absent" (the recurring "we keep
       // missing things" failure). Informational → stdout: a skip is not a failure.
-      if (!values["json"] && built.skippedLargePaths.length > 0) {
+      if (built.skippedLargePaths.length > 0 && !values["json"]) {
         process.stdout.write(
           `myco: note — ${built.skippedLargePaths.length} file(s) over --max-size ` +
             `not searched (run \`myco index\` to list them)\n`,
@@ -338,7 +340,9 @@ async function cmdSearch(
   if (
     outcome.searchTimeBudgetExceeded ||
     outcome.regexTimedOut ||
-    outcome.regexLinesTruncated > 0
+    outcome.regexLinesTruncated > 0 ||
+    !outcome.complete ||
+    outcome.unknown.length > 0
   ) return 2;
   return outcome.matches.length > 0 ? 0 : 1;
 }
@@ -361,6 +365,7 @@ async function run(argv: string[]): Promise<number> {
       "no-gitignore": { type: "boolean" },
       "no-refresh": { type: "boolean" },
       "max-size": { type: "string" },
+      "hash-oversize": { type: "boolean" },
       in: { type: "string", multiple: true },
       vendored: { type: "boolean" },
       help: { type: "boolean", short: "h" },

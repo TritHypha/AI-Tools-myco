@@ -176,11 +176,17 @@ test("name-only content-skip tags round-trip (k=b / k=l) and refuse polluted row
 
     // saveGraph preserves k
     const g = new SearchGraph();
-    g.setFile("big.dat", 2, 1_000_000, new Map(), "large");
+    g.setFile("big.dat", 2, 1_000_000, new Map(), "large", 0, {
+      type: "UNKNOWN",
+      state: "INDEXED_UNKNOWN",
+      reason: "OVERSIZE",
+      thresholdBytes: 500_000,
+    });
     await saveGraph(root, g);
     const again = await loadGraph(root);
     assert.ok(again);
     assert.equal([...again!.graph.files()][0]?.contentSkip, "large");
+    assert.equal([...again!.graph.files()][0]?.unknown?.state, "INDEXED_UNKNOWN");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
