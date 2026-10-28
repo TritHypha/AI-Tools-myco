@@ -21,6 +21,7 @@
 // cargo `target/` tree — thousands of build artefacts — got indexed, bloating
 // the index and the incremental refresh (the 28k-file timeout, owner 2026-07-25).
 
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
@@ -45,6 +46,13 @@ export interface WalkOptions {
   // trees (field report 2026-07-25). Skips are REPORTED via `skippedVendored`,
   // never silent — the "no silent caps" contract (DESIGN §8/§10).
   includeVendored?: boolean;
+  // Index git-TRACKED files even when a .gitignore rule matches them (default
+  // true). A tracked file is part of the repo whatever .gitignore says, so leaving
+  // it out was a silent coverage gap. Each such file is REPORTED via the
+  // `trackedIgnored` out-param. A .mycoignore rule still wins: it is an explicit
+  // myco choice, not a git one. Untracked files under an ignored dir stay out.
+  // (Folded from the parallel Work-driver slice wd-f62bd880.)
+  includeTrackedIgnored?: boolean;
 }
 
 interface Rule {
@@ -53,6 +61,7 @@ interface Rule {
   negate: boolean;
   basename: boolean; // no-slash rule -> test the basename, else the full path
   base: string; // relDir of the ignore file that declared this rule ("" = root); scopes it to that subtree
+  source: "myco" | "git"; // .mycoignore rules always win; .gitignore rules yield to git-tracked files
 }
 
 // Directories we never descend into, regardless of ignore files.
@@ -73,7 +82,7 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
-function parseIgnore(text: string, base: string): Rule[] {
+function parseIgnore(text: string, base: string, source: "myco" | "git" = "git"): Rule[] {
   const rules: Rule[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
@@ -93,7 +102,7 @@ function parseIgnore(text: string, base: string): Rule[] {
     if (body.startsWith("**/")) body = body.slice(3);
     if (body === "") continue;
     const basename = !anchored && !body.includes("/");
-    rules.push({ re: globToRegExp(body), dirOnly, negate, basename, base });
+    rules.push({ re: globToRegExp(body), dirOnly, negate, basename, base, source });
   }
   return rules;
 }
@@ -116,14 +125,16 @@ async function loadDirRules(
   useGitignore: boolean,
   fileNames: Set<string>,
 ): Promise<Rule[]> {
-  let text = "";
+  const rules: Rule[] = [];
   if (fileNames.has(".mycoignore")) {
-    text += await readIfPresent(path.join(absDir, ".mycoignore"));
+    const text = await readIfPresent(path.join(absDir, ".mycoignore"));
+    if (text.trim() !== "") rules.push(...parseIgnore(text, relDir, "myco"));
   }
   if (useGitignore && fileNames.has(".gitignore")) {
-    text += "\n" + (await readIfPresent(path.join(absDir, ".gitignore")));
+    const text = await readIfPresent(path.join(absDir, ".gitignore"));
+    if (text.trim() !== "") rules.push(...parseIgnore(text, relDir, "git"));
   }
-  return text.trim() === "" ? [] : parseIgnore(text, relDir);
+  return rules;
 }
 
 // Returns true when `relPath` (a POSIX path, relative to the walk root) should be
@@ -145,6 +156,44 @@ function isIgnored(rules: Rule[], relPath: string, isDir: boolean): boolean {
   return ignored;
 }
 
+// Paths git TRACKS under `root` (POSIX, root-relative; `git ls-files -z`, so
+// names with spaces, quotes, newlines or unicode arrive verbatim). A tracked file
+// is part of the repo whatever .gitignore says, so it must be indexed — the
+// 2026-10-28 gap. Returns undefined when `root` is not in a git work tree or git
+// is unavailable; the walk then behaves exactly as before (ignore rules only).
+export function gitTrackedPaths(root: string): Set<string> | undefined {
+  let out: Buffer;
+  try {
+    out = execFileSync("git", ["-C", root, "ls-files", "-z", "--cached", "--"], {
+      encoding: "buffer",
+      maxBuffer: 1024 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+  } catch {
+    return undefined;
+  }
+  const tracked = new Set<string>();
+  for (const p of out.toString("utf8").split("\0")) if (p !== "") tracked.add(p);
+  return tracked;
+}
+
+// Every ancestor directory of a tracked path, so the walk knows which ignored
+// directories still hold tracked files and must be descended (tracked-only).
+function trackedAncestors(tracked: Set<string>): Set<string> {
+  const dirs = new Set<string>();
+  for (const p of tracked) {
+    let i = p.lastIndexOf("/");
+    while (i > 0) {
+      const d = p.slice(0, i);
+      if (dirs.has(d)) break;
+      dirs.add(d);
+      i = d.lastIndexOf("/");
+    }
+  }
+  return dirs;
+}
+
 // Walk `root` breadth-unspecified, yielding every file that survives the ignore
 // rules and the size cap. Symlinks are not followed (avoids cycles and escapes).
 export async function walk(
@@ -152,13 +201,21 @@ export async function walk(
   opts: WalkOptions,
   skippedLarge?: string[], // out: paths skipped for exceeding maxFileSize — reported, never silent
   skippedVendored?: string[], // out: vendored dirs (node_modules) pruned by default — reported, never silent
+  trackedIgnored?: string[], // out: git-tracked files a .gitignore rule matched, indexed anyway and reported
 ): Promise<FileMeta[]> {
   const out: FileMeta[] = [];
+  const keepTracked = opts.useGitignore && opts.includeTrackedIgnored !== false;
+  const tracked = keepTracked ? gitTrackedPaths(root) : undefined;
+  const trackedDirs = tracked ? trackedAncestors(tracked) : new Set<string>();
+  const mycoOnly = (rules: Rule[]): Rule[] => rules.filter((r) => r.source === "myco");
 
+  // `trackedOnly`: this directory is ignored but holds git-tracked paths, so it is
+  // descended ONLY for those — untracked ignored content stays ignored.
   async function recur(
     absDir: string,
     relDir: string,
     inherited: Rule[],
+    trackedOnly = false,
   ): Promise<void> {
     let entries: import("node:fs").Dirent[];
     try {
@@ -183,10 +240,16 @@ export async function walk(
           skippedVendored?.push(rel); // a pruned vendored tree must be visible, not silent
           continue;
         }
-        if (isIgnored(rules, rel, true)) continue;
-        await recur(path.join(absDir, ent.name), rel, rules);
+        if (isIgnored(mycoOnly(rules), rel, true)) continue;
+        const dirIgnored = trackedOnly || isIgnored(rules, rel, true);
+        if (dirIgnored && !trackedDirs.has(rel)) continue;
+        await recur(path.join(absDir, ent.name), rel, rules, dirIgnored);
       } else if (ent.isFile()) {
-        if (isIgnored(rules, rel, false)) continue;
+        if (isIgnored(mycoOnly(rules), rel, false)) continue;
+        if (trackedOnly || isIgnored(rules, rel, false)) {
+          if (!tracked?.has(rel)) continue;
+          trackedIgnored?.push(rel); // indexed although .gitignore matches: reported, never silent
+        }
         let st: import("node:fs").Stats;
         try {
           st = await fs.stat(path.join(absDir, ent.name));

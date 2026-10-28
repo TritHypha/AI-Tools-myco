@@ -6,6 +6,7 @@
 // are dropped. That is what makes a re-index after editing one file nearly free.
 
 import { createHash } from "node:crypto";
+import { constants as bufferConstants } from "node:buffer";
 import { createReadStream, promises as fs } from "node:fs";
 import { pipeline } from "node:stream/promises";
 
@@ -23,6 +24,8 @@ export interface IndexOptions {
   includeVendored?: boolean; // descend into node_modules (default false; skips reported)
   /** Stream-hash over-size files (bounded streamed read, never tokenized). Default false. */
   hashOversize?: boolean;
+  /** Index git-tracked files that .gitignore matches (default true; reported). */
+  includeTrackedIgnored?: boolean;
 }
 
 export interface IndexStats {
@@ -36,13 +39,24 @@ export interface IndexStats {
   skippedVendored: number; // vendored dirs (node_modules) pruned by default (reported, never silent)
   omittedOverlongTerms: number; // overlong token occurrences omitted from term edges
   filesWithOmittedOverlongTerms: number; // files retained with omission metadata
+  trackedIgnored: number; // git-tracked files indexed although .gitignore matches them (reported)
+  unreadable: number; // listed files whose content read failed this run (reported, never silent)
 }
 
+/** "No size cap" — the default since 2026-10-28 (index everything, miss nothing). */
+export const UNLIMITED_FILE_SIZE = Number.MAX_SAFE_INTEGER;
+
 export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
-  maxFileSize: 5 * 1024 * 1024,
+  // No default size limit: every file is content-indexed (owner 2026-10-28).
+  // --max-size remains an optional, reported cap.
+  maxFileSize: UNLIMITED_FILE_SIZE,
   useGitignore: true,
   hashOversize: false,
+  includeTrackedIgnored: true,
 };
+
+// Largest text one in-process string can hold (bytes >= UTF-16 units for UTF-8).
+export const ENGINE_TEXT_LIMIT = Math.min(bufferConstants.MAX_STRING_LENGTH, 2 ** 31 - 1);
 
 async function streamSha256(absPath: string): Promise<string | undefined> {
   try {
@@ -76,6 +90,8 @@ export async function buildIndex(
   skippedLargePaths: string[];
   skippedVendoredDirs: string[];
   omittedOverlongTermPaths: string[];
+  unreadablePaths: string[];
+  trackedIgnoredPaths: string[];
 }> {
   const prior = await loadGraph(root);
   const graph = prior?.graph ?? new SearchGraph();
@@ -91,17 +107,27 @@ export async function buildIndex(
     skippedVendored: 0,
     omittedOverlongTerms: 0,
     filesWithOmittedOverlongTerms: 0,
+    trackedIgnored: 0,
+    unreadable: 0,
   };
 
   const skippedLargePaths: string[] = [];
   const skippedVendoredDirs: string[] = [];
-  const metas = await walk(root, opts, skippedLargePaths, skippedVendoredDirs);
+  const unreadablePaths: string[] = [];
+  const trackedIgnoredPaths: string[] = [];
+  const metas = await walk(root, opts, skippedLargePaths, skippedVendoredDirs, trackedIgnoredPaths);
   const seen = new Set<string>();
 
   for (const meta of metas) {
     seen.add(meta.relPath);
     const existing = graph.fileByPath(meta.relPath);
-    const wantLarge = meta.contentSkip === "large";
+    // A file beyond what one JS string can hold cannot be tokenized in-process.
+    // It is never dropped: it is name-indexed with an explicit OVERSIZE marker
+    // (threshold = the engine limit) and listed in skippedLargePaths.
+    const engineLimited = meta.contentSkip !== "large" && meta.size > ENGINE_TEXT_LIMIT;
+    if (engineLimited) skippedLargePaths.push(meta.relPath);
+    const wantLarge = meta.contentSkip === "large" || engineLimited;
+    const threshold = engineLimited ? ENGINE_TEXT_LIMIT : opts.maxFileSize;
 
     // Incremental reuse when size+mtime match AND the content-skip role is stable.
     // Role changes (cap raised/lowered, binary↔text) fall through and re-classify.
@@ -113,7 +139,7 @@ export async function buildIndex(
       if (
         wantLarge
         && existing.contentSkip === "large"
-        && existing.unknown?.thresholdBytes === opts.maxFileSize
+        && existing.unknown?.thresholdBytes === threshold
         && (!opts.hashOversize || existing.unknown?.sha256 !== undefined)
       ) {
         stats.unchanged++;
@@ -142,7 +168,7 @@ export async function buildIndex(
         new Map(),
         "large",
         0,
-        oversizeMarker(opts.maxFileSize, sha256),
+        oversizeMarker(threshold, sha256),
       );
       if (existing) stats.updated++;
       else stats.added++;
@@ -153,7 +179,10 @@ export async function buildIndex(
     try {
       buf = await fs.readFile(meta.absPath);
     } catch {
-      continue; // races with deletion, permission errors — skip, don't crash
+      // Races with deletion, permission errors: don't crash, but never silently —
+      // the path is reported so a miss cannot read as absence.
+      unreadablePaths.push(meta.relPath);
+      continue;
     }
     if (looksBinary(buf)) {
       // Name-index only — still findable by `-f`, never opened for content.
@@ -188,6 +217,8 @@ export async function buildIndex(
 
   stats.skippedLarge = skippedLargePaths.length;
   stats.skippedVendored = skippedVendoredDirs.length;
+  stats.trackedIgnored = trackedIgnoredPaths.length;
+  stats.unreadable = unreadablePaths.length;
   stats.files = graph.fileCount();
   const omittedOverlongTermPaths = [...graph.files()]
     .filter((file) => (file.omittedOverlongTerms ?? 0) > 0)
@@ -207,5 +238,7 @@ export async function buildIndex(
     skippedLargePaths,
     skippedVendoredDirs,
     omittedOverlongTermPaths,
+    unreadablePaths,
+    trackedIgnoredPaths,
   };
 }

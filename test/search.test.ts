@@ -252,16 +252,30 @@ test("regex line-length coverage cap is explicit, never a silent absence", async
     context: 0,
   };
   try {
+    // A TriRegex-supported pattern now streams the WHOLE over-long line.
     const outcome = await searchFile(file, "needle", opts);
     assert.ok(!isError(outcome));
     if (isError(outcome)) return;
-    assert.equal(outcome.matches.length, 0);
-    assert.equal(outcome.regexLinesTruncated, 1);
-    assert.equal(outcome.truncated, true);
+    assert.equal(outcome.matches.length, 1);
+    assert.equal(outcome.matches[0]!.col, 200_002);
+    assert.equal(outcome.regexLinesTruncated, 0);
+    assert.deepEqual(outcome.longLineRefusals, []);
+    assert.equal(outcome.truncated, false);
+    // A construct TriRegex refuses (lookaround) falls back to the capped prefix
+    // scan, and BOTH the cap and the refusal are explicit — never a silent absence.
+    const refused = await searchFile(file, "needle(?=$)", opts);
+    assert.ok(!isError(refused));
+    if (isError(refused)) return;
+    assert.equal(refused.matches.length, 0);
+    assert.equal(refused.regexLinesTruncated, 1);
+    assert.equal(refused.longLineRefusals.length, 1);
+    assert.equal(refused.truncated, true);
+    assert.equal(refused.complete, false);
     assert.match(
-      summaryLine(outcome),
+      summaryLine(refused),
       /searched only to the 200000-UTF-16-code-unit cap/,
     );
+    assert.match(summaryLine(refused), /TriRegex REFUSED 1 over-long line/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

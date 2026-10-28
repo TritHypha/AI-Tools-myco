@@ -1,8 +1,15 @@
 import * as path from "node:path";
 
-export const MAX_INDEX_PATH_LENGTH = 4096;
+// No fixed path-length or terms-per-file cap (owner 2026-10-28: "index
+// everything"). Large indexes are sharded on disk instead (store.ts), so nothing
+// is dropped to fit a single file. These are kept as exported names for
+// compatibility; both are the largest safe integer, i.e. "no cap".
+export const MAX_INDEX_PATH_LENGTH = Number.MAX_SAFE_INTEGER;
+export const MAX_INDEX_TERMS_PER_FILE = Number.MAX_SAFE_INTEGER;
+// A single token longer than this is not stored as a term edge; the file keeps
+// an explicit `o` marker (count) and is DIRECTLY verified at search time, so the
+// content is still searchable — never silently dropped — and the count is reported.
 export const MAX_INDEX_TERM_LENGTH = 4096;
-export const MAX_INDEX_TERMS_PER_FILE = 100_000;
 
 export interface IndexLimits {
   maxTermsPerFile: number;
