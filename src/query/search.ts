@@ -23,6 +23,7 @@ import {
   REGEX_OPERATION_TIME_BUDGET_MS,
   SEARCH_TIME_BUDGET_MS,
 } from "./regex-guard.ts";
+import { compile as triCompile } from "../vendor/triregex/index.ts";
 
 export type MatchMode = "word" | "substring" | "regex";
 
@@ -61,6 +62,13 @@ export interface SearchResult {
   regexTimedOut: boolean;
   /** Lines whose suffix was not searched because it exceeded the regex input cap. */
   regexLinesTruncated: number;
+  /**
+   * Lines longer than MAX_REGEX_LINE_LEN are matched in full by the vendored
+   * TriRegex streaming engine. When TriRegex REFUSES (unsupported construct,
+   * budget, ASCII-only case folding, match cap) the refusal is recorded here and
+   * the result is incomplete — a refusal is never treated as "no hit".
+   */
+  longLineRefusals: LongLineRefusal[];
   // Word-mode only: files that CONTAIN the pattern verbatim but produced no match
   // because the word-boundary test rejected them. Surfaced so a narrowed result can
   // never be mistaken for absence — the "no silent caps" contract (DESIGN §8/§10)
@@ -86,6 +94,13 @@ export interface SearchResult {
   unknown: UnknownSearchHit[];
   /** Fail-closed: false whenever unknown is non-empty or coverage is incomplete. */
   complete: boolean;
+}
+
+export interface LongLineRefusal {
+  path: string;
+  line: number;
+  code: string;
+  reason: string;
 }
 
 export interface UnknownSearchHit {
@@ -139,12 +154,14 @@ function resultComplete(
     searchTimeBudgetExceeded: boolean;
     regexTimedOut: boolean;
     regexLinesTruncated: number;
+    longLineRefusals: LongLineRefusal[];
   },
 ): boolean {
   return unknown.length === 0
     && !flags.searchTimeBudgetExceeded
     && !flags.regexTimedOut
-    && flags.regexLinesTruncated === 0;
+    && flags.regexLinesTruncated === 0
+    && flags.longLineRefusals.length === 0;
 }
 
 function withUnknown(
@@ -287,6 +304,77 @@ function candidates(
   return acc === null ? [] : [...acc];
 }
 
+// Literal (word/substring) query description, needed to stream long lines.
+export interface LiteralQuery {
+  query: string;
+  mode: "word" | "substring";
+  sensitive: boolean;
+}
+
+// TriRegex escapes: identity escapes for ASCII punctuation; everything else literal.
+function escapeTri(s: string): string {
+  return s.replace(/[!-/:-@[-`{-~]/g, "\\$&");
+}
+
+const TRI_MAX_MATCHES = 10_000_000;
+
+/**
+ * Match a line longer than MAX_REGEX_LINE_LEN IN FULL with TriRegex's single
+ * forward pass (non-backtracking, no rewind). Returns hits in UTF-16 columns, or
+ * a refusal value — never a silent "no hit".
+ */
+export function scanLongLine(
+  line: string,
+  pattern: string,
+  ignoreCase: boolean,
+  word?: { lead: boolean; trail: boolean },
+): { hits: Array<{ col: number; length: number }> } | { refused: { code: string; reason: string } } {
+  const compiled = triCompile(pattern, { ignoreCase, budget: { maxPatternLength: Math.max(4096, pattern.length) } });
+  if (!compiled.ok) return { refused: { code: compiled.code, reason: compiled.reason } };
+  const res = compiled.findAll(line, { spanUnit: "utf16", maxMatches: TRI_MAX_MATCHES });
+  if (res.truncated) {
+    return { refused: { code: "TPRX-MAXMATCHES", reason: `more than ${TRI_MAX_MATCHES} matches on one line` } };
+  }
+  const hits: Array<{ col: number; length: number }> = [];
+  for (const [start, end] of res.spans) {
+    if (word) {
+      const before = start > 0 ? String.fromCodePoint(line.codePointAt(start - 1 - (isLowSurrogate(line, start - 1) ? 1 : 0)) ?? 0) : "";
+      const after = end < line.length ? String.fromCodePoint(line.codePointAt(end) ?? 0) : "";
+      if (word.lead && before !== "" && WORD_CHAR.test(before)) continue;
+      if (word.trail && after !== "" && WORD_CHAR.test(after)) continue;
+    }
+    hits.push({ col: start + 1, length: end - start });
+  }
+  return { hits };
+}
+
+function isLowSurrogate(s: string, i: number): boolean {
+  const c = s.charCodeAt(i);
+  return c >= 0xdc00 && c <= 0xdfff && i > 0;
+}
+
+function scanLiteralLongLine(
+  line: string,
+  lit: LiteralQuery,
+): { hits: Array<{ col: number; length: number }> } | { refused: { code: string; reason: string } } {
+  // TriRegex folds ASCII only; JS `iu` folds Unicode. Refuse rather than guess.
+  if (!lit.sensitive && /[^\x00-\x7f]/.test(lit.query)) {
+    return {
+      refused: {
+        code: "MYCO-TRI-CASEFOLD",
+        reason: "case-insensitive non-ASCII query on an over-long line: TriRegex folds ASCII only",
+      },
+    };
+  }
+  const word = lit.mode === "word"
+    ? {
+      lead: WORD_CHAR.test(lit.query[0] ?? ""),
+      trail: WORD_CHAR.test(lit.query[lit.query.length - 1] ?? ""),
+    }
+    : undefined;
+  return scanLongLine(line, escapeTri(lit.query), !lit.sensitive, word);
+}
+
 function scanLine(
   line: string,
   matcher: RegExp,
@@ -294,6 +382,8 @@ function scanLine(
   const hits: Array<{ col: number; length: number }> = [];
   // Bound the input to any single exec — the ReDoS input-size guard. Positions in
   // the prefix are identical to the original line, so reported columns stay valid.
+  // (Content lines over the cap never reach here: matchFile streams them through
+  // TriRegex. Only file-name matching uses this directly.)
   const hay = line.length > MAX_REGEX_LINE_LEN ? line.slice(0, MAX_REGEX_LINE_LEN) : line;
   matcher.lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -311,18 +401,32 @@ async function matchFile(
   matcher: RegExp,
   context: number,
   loose?: RegExp,
-): Promise<{ hits: Match[]; excludedByBoundary: boolean }> {
+  lit?: LiteralQuery,
+): Promise<{ hits: Match[]; excludedByBoundary: boolean; refusals: LongLineRefusal[] }> {
   let text: string;
   try {
     text = await fs.readFile(absPath, "utf8");
   } catch {
-    return { hits: [], excludedByBoundary: false };
+    return { hits: [], excludedByBoundary: false, refusals: [] };
   }
   const lines = text.split("\n");
   const out: Match[] = [];
+  const refusals: LongLineRefusal[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    for (const hit of scanLine(line, matcher)) {
+    let lineHits: Array<{ col: number; length: number }>;
+    if (line.length > MAX_REGEX_LINE_LEN && lit !== undefined) {
+      const streamed = scanLiteralLongLine(line, lit);
+      if ("refused" in streamed) {
+        refusals.push({ path: relPath, line: i + 1, ...streamed.refused });
+        lineHits = scanLine(line, matcher); // prefix only; the refusal marks the result incomplete
+      } else {
+        lineHits = streamed.hits;
+      }
+    } else {
+      lineHits = scanLine(line, matcher);
+    }
+    for (const hit of lineHits) {
       out.push({
         path: relPath,
         line: i + 1,
@@ -339,7 +443,7 @@ async function matchFile(
   // zero-hit candidates only.
   const excludedByBoundary =
     out.length === 0 && loose !== undefined && loose.test(text);
-  return { hits: out, excludedByBoundary };
+  return { hits: out, excludedByBoundary, refusals };
 }
 
 async function matchFileRegex(
@@ -349,11 +453,13 @@ async function matchFileRegex(
   context: number,
   maxHits: number,
   operationTimeoutMs: number,
+  tri?: { pattern: string; ignoreCase: boolean },
 ): Promise<{
   hits: Match[];
   regexLinesTruncated: number;
   regexTimedOut: boolean;
   hitLimitReached: boolean;
+  refusals: LongLineRefusal[];
 }> {
   let text: string;
   try {
@@ -364,13 +470,39 @@ async function matchFileRegex(
       regexLinesTruncated: 0,
       regexTimedOut: false,
       hitLimitReached: false,
+      refusals: [],
     };
   }
   const lines = text.split("\n");
   const out: Match[] = [];
+  const refusals: LongLineRefusal[] = [];
   let regexLinesTruncated = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
+    if (line.length > MAX_REGEX_LINE_LEN && tri !== undefined) {
+      // Over-long line: stream the WHOLE line through TriRegex (leftmost-longest,
+      // non-backtracking). A refusal falls back to the capped JS prefix scan and
+      // is reported — never read as absence.
+      const streamed = scanLongLine(line, tri.pattern, tri.ignoreCase);
+      if (!("refused" in streamed)) {
+        for (const hit of streamed.hits) {
+          out.push({
+            path: relPath,
+            line: i + 1,
+            col: hit.col,
+            length: hit.length,
+            text: line,
+            before: context > 0 ? lines.slice(Math.max(0, i - context), i) : [],
+            after: context > 0 ? lines.slice(i + 1, i + 1 + context) : [],
+          });
+        }
+        if (out.length >= maxHits) {
+          return { hits: out, regexLinesTruncated, regexTimedOut: false, hitLimitReached: true, refusals };
+        }
+        continue;
+      }
+      refusals.push({ path: relPath, line: i + 1, ...streamed.refused });
+    }
     const scanned = await executor.scan(
       line,
       MAX_REGEX_LINE_LEN,
@@ -384,6 +516,7 @@ async function matchFileRegex(
         regexLinesTruncated,
         regexTimedOut: true,
         hitLimitReached: false,
+        refusals,
       };
     }
     for (const hit of scanned.hits) {
@@ -403,6 +536,7 @@ async function matchFileRegex(
         regexLinesTruncated,
         regexTimedOut: false,
         hitLimitReached: true,
+        refusals,
       };
     }
   }
@@ -411,6 +545,7 @@ async function matchFileRegex(
     regexLinesTruncated,
     regexTimedOut: false,
     hitLimitReached: false,
+    refusals,
   };
 }
 
@@ -481,6 +616,7 @@ function searchNames(
     searchTimeBudgetExceeded: false,
     regexTimedOut: false,
     regexLinesTruncated: 0,
+    longLineRefusals: [],
     wordBoundaryExcluded: excluded,
     prunedToZero: false, // name search scans every indexed path — nothing is pruned
     pathFilterExcluded: filtered,
@@ -554,6 +690,7 @@ async function searchNamesRegex(
     searchTimeBudgetExceeded,
     regexTimedOut,
     regexLinesTruncated: 0,
+    longLineRefusals: [],
     wordBoundaryExcluded: 0,
     prunedToZero: false,
     pathFilterExcluded: filtered,
@@ -647,6 +784,7 @@ export async function search(
   let budgetExceeded = false;
   let regexTimedOut = false;
   let regexLinesTruncated = 0;
+  const longLineRefusals: LongLineRefusal[] = [];
   let resultLimitExceeded = false;
   let searched = 0;
   let excluded = 0;
@@ -677,9 +815,11 @@ export async function search(
           opts.context,
           Math.max(1, opts.limit + 1 - all.length),
           Math.min(REGEX_OPERATION_TIME_BUDGET_MS, remaining),
+          { pattern: query, ignoreCase: !sensitive },
         );
         hits = scanned.hits;
         regexLinesTruncated += scanned.regexLinesTruncated;
+        longLineRefusals.push(...scanned.refusals);
         if (scanned.regexTimedOut) {
           regexTimedOut = true;
           all.push(...hits);
@@ -694,9 +834,11 @@ export async function search(
           matcher,
           opts.context,
           loose,
+          { query, mode: opts.mode as "word" | "substring", sensitive },
         );
         hits = matchedFile.hits;
         excludedByBoundary = matchedFile.excludedByBoundary;
+        longLineRefusals.push(...matchedFile.refusals);
       }
     if (hits.length > 0) {
       filesMatched.add(rec.path);
@@ -723,11 +865,13 @@ export async function search(
       resultLimitExceeded ||
       budgetExceeded ||
       regexTimedOut ||
-      regexLinesTruncated > 0,
+      regexLinesTruncated > 0 ||
+      longLineRefusals.length > 0,
     resultLimitExceeded,
     searchTimeBudgetExceeded: budgetExceeded,
     regexTimedOut,
     regexLinesTruncated,
+    longLineRefusals,
     wordBoundaryExcluded: excluded,
     // The index pruned to an EMPTY candidate set (multi-term AND with no common
     // file) — surfaced so "(0 searched)" explains itself instead of reading as absence.
@@ -779,6 +923,7 @@ export async function searchFile(
       searchTimeBudgetExceeded: false,
       regexTimedOut: false,
       regexLinesTruncated: 0,
+    longLineRefusals: [],
       wordBoundaryExcluded: hits.length === 0 && loose !== undefined && loose.test(rel) ? 1 : 0,
       prunedToZero: false, // single-file search has no index to prune
       // --in scopes a tree; an explicit single-file target IS the scope. The CLI
@@ -792,6 +937,7 @@ export async function searchFile(
   let excludedByBoundary = false;
   let regexTimedOut = false;
   let regexLinesTruncated = 0;
+  const longLineRefusals: LongLineRefusal[] = [];
   let resultLimitExceeded = false;
   if (opts.mode === "regex") {
     const executor = new RegexExecutor(query, matcher.flags);
@@ -803,18 +949,25 @@ export async function searchFile(
         opts.context,
         Math.max(1, opts.limit + 1),
         REGEX_OPERATION_TIME_BUDGET_MS,
+        { pattern: query, ignoreCase: !sensitive },
       );
       hits = scanned.hits;
       regexTimedOut = scanned.regexTimedOut;
       regexLinesTruncated = scanned.regexLinesTruncated;
+      longLineRefusals.push(...scanned.refusals);
       resultLimitExceeded = scanned.hitLimitReached;
     } finally {
       await executor.close();
     }
   } else {
-    const matchedFile = await matchFile(absFile, rel, matcher, opts.context, loose);
+    const matchedFile = await matchFile(absFile, rel, matcher, opts.context, loose, {
+      query,
+      mode: opts.mode as "word" | "substring",
+      sensitive,
+    });
     hits = matchedFile.hits;
     excludedByBoundary = matchedFile.excludedByBoundary;
+    longLineRefusals.push(...matchedFile.refusals);
   }
   const ranked = rank(hits);
   resultLimitExceeded ||= ranked.length > opts.limit;
@@ -822,11 +975,12 @@ export async function searchFile(
     matches: ranked.slice(0, opts.limit),
     filesSearched: 1,
     filesMatched: hits.length > 0 ? 1 : 0,
-    truncated: resultLimitExceeded || regexTimedOut || regexLinesTruncated > 0,
+    truncated: resultLimitExceeded || regexTimedOut || regexLinesTruncated > 0 || longLineRefusals.length > 0,
     resultLimitExceeded,
     searchTimeBudgetExceeded: false,
     regexTimedOut,
     regexLinesTruncated,
+    longLineRefusals,
     wordBoundaryExcluded: excludedByBoundary ? 1 : 0,
     prunedToZero: false, // single-file search has no index to prune
     pathFilterExcluded: 0,

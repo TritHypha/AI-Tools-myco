@@ -14,6 +14,29 @@ that the silence was the defect, not the narrowing.
 
 ### Added
 
+- **Index everything.** No default size cap (`--max-size` stays optional and every
+  skip is listed); search `--limit` defaults to 1000; sharded, no-loss index store
+  (sha256 manifest; a tampered or missing shard fails closed; legacy `index.json`
+  still read). Git-tracked files are indexed even when `.gitignore` matches them and
+  are listed (`--no-tracked-ignored` restores the old walk; `.mycoignore` still wins).
+- **Results tree.** A directory search in a git app also searches every local branch
+  (from git objects, no checkout) and every worktree into
+  `.myco/results/<query-token>/<target>/` (hits.txt as `repo@commit:path:line`,
+  hits.json, target.json). Folder tokens are reversible percent-encodings, case-distinct.
+- **Compare.** `myco compare <path>` writes git's own unified diff per branch/worktree
+  vs main HEAD and `thread.md`: every version ordered by commit time, naming the
+  branch that changed which lines.
+- **Coverage summaries.** Every index/search/compare run prints branches, worktrees,
+  files, shards and skipped/unreadable/refused, and writes `summary.md`.
+- **`--branch` / `--worktree`** (repeatable) limit a run; the summary says so and an
+  unmatched filter is an error. `index --branch` is refused (branches are never
+  indexed on disk).
+- **Long lines.** Lines over the 200k regex cap are matched in full by vendored
+  TriRegex 0.5.0 (`src/vendor/triregex`, commit e93569f, zero deps). A TriRegex
+  refusal is reported and makes the result incomplete (exit 2), never a no-hit.
+- Odd filenames (spaces, unicode, newlines, quotes, backslashes, leading `-`,
+  case-only clashes, very long paths): NUL-separated git output and `:(literal)`
+  pathspecs throughout.
 - Opt-in foreground `links watch`: bounded local-document path detection,
   event acceleration, periodic full reconciliation, and independent
   `myco.links.v1` snapshots for advisory consumers such as Hypha.

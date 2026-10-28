@@ -132,6 +132,7 @@ export function render(
           searchTimeBudgetExceeded: result.searchTimeBudgetExceeded,
           regexTimedOut: result.regexTimedOut,
           regexLinesTruncated: result.regexLinesTruncated,
+          longLineRefusals: result.longLineRefusals,
           wordBoundaryExcluded: result.wordBoundaryExcluded,
           prunedToZero: result.prunedToZero,
           pathFilterExcluded: result.pathFilterExcluded,
@@ -166,6 +167,13 @@ export function summaryLine(result: SearchResult): string {
     const n = result.regexLinesTruncated;
     bits.push(
       `[incomplete — ${n} over-size regex line${n === 1 ? "" : "s"} searched only to the ${MAX_REGEX_LINE_LEN}-UTF-16-code-unit cap]`,
+    );
+  }
+  if (result.longLineRefusals.length > 0) {
+    const n = result.longLineRefusals.length;
+    const first = result.longLineRefusals[0]!;
+    bits.push(
+      `[incomplete — TriRegex REFUSED ${n} over-long line${n === 1 ? "" : "s"} (${first.code}: ${first.reason}; first at ${first.path}:${first.line}) — not proof of absence]`,
     );
   }
   // Never let a narrowed result read as absence. If whole-word matching threw away

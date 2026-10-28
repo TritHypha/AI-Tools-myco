@@ -279,3 +279,17 @@ Run `myco links watch <root> --snapshot <outside-root-directory>/links.json`
 to monitor supported Markdown/text paths, including fragile Temp references.
 It runs in the foreground until Ctrl+C; no startup installation occurs.
 See [the scope, limits and snapshot contract](docs/LINK-MONITOR.md).
+
+## Full index, results tree and compare
+
+- `myco index` indexes everything: no size cap unless you pass `--max-size N`,
+  git-tracked files even when `.gitignore` matches them (`--no-tracked-ignored` to
+  opt out), sharded store that fails closed on tampering.
+- In a git app, `myco <pattern>` also searches every branch (from git objects) and
+  every worktree into `.myco/results/<query-token>/` with a `summary.md`.
+- `myco compare <path>` gives git unified diffs vs main HEAD plus a `thread.md`
+  history across branches.
+- `--branch NAME` / `--worktree PATH` (repeatable) limit a run; the coverage
+  summary printed by every run states when it was limited.
+- Very long lines are searched in full with the vendored TriRegex engine; a refusal is
+  reported, never treated as no-hit.

@@ -15,9 +15,9 @@ import { parseArgs } from "node:util";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-import { buildIndex, DEFAULT_INDEX_OPTIONS } from "./ingest/indexer.ts";
+import { buildIndex, DEFAULT_INDEX_OPTIONS, UNLIMITED_FILE_SIZE } from "./ingest/indexer.ts";
 import type { IndexOptions } from "./ingest/indexer.ts";
-import { loadGraph, loadGraphOutcome } from "./graph/store.ts";
+import { loadGraph, loadGraphOutcome, storedIndexBytes, storedIndexLayout } from "./graph/store.ts";
 import type { SaveOutcome } from "./graph/store.ts";
 import { buildPathFilter } from "./query/path-filter.ts";
 import { search, searchFile, isError, detectRegexIntent } from "./query/search.ts";
@@ -25,6 +25,8 @@ import type { MatchMode, SearchOptions, SearchOutcome } from "./query/search.ts"
 import { render, summaryLine } from "./output.ts";
 import { VERSION } from "./index.ts";
 import { linksCommand } from "./links.ts";
+import { compareTree, filterActive, listTargets, renderCoverage, repoTop, searchTree } from "./query/branches.ts";
+import type { Coverage, TargetFilter } from "./query/branches.ts";
 
 const HELP = `myco ${VERSION} — grep, but it grows a graph.
 
@@ -33,6 +35,7 @@ USAGE
   myco search <pattern> [path] explicit search (when pattern is a command name)
   myco index [path]            build/refresh the graph index
   myco status [path]           show index statistics
+  myco compare <path> [root]   compare one file across every branch + worktree vs main HEAD
   myco links watch <root> --snapshot <file>   foreground link monitor (links --help)
 
 MATCHING
@@ -57,18 +60,41 @@ SCOPE
 
 OUTPUT
   -C, --context N   show N lines of context (content search)
-  -n, --limit N     max results (default 200)
+  -n, --limit N     max results (default 1000)
       --json        machine-readable JSON
       --no-color    disable ANSI color
+
+GIT APPS (results tree)
+  In a git repo, a directory search ALSO searches every local branch (read from
+  git objects at the branch commit — nothing is checked out) and every worktree,
+  writing .myco/results/<query-token>/<branch__name | worktree__path>/hits.txt
+  (repo@commit:path:line:text) plus summary.json. Unreadable targets are reported.
+      --no-branches   skip the branch/worktree results tree
+      --branch NAME   limit search/compare to this local branch; repeatable
+      --worktree P    limit index/search/compare to this worktree (path or name); repeatable
+                      Default: ALL branches and worktrees. A limited run says so in its
+                      coverage summary; a filter matching nothing is an error (exit 2).
+                      (index --branch is refused: branches are read from git objects at
+                      query time and are never indexed on disk.)
+  Every index/search/compare run prints a coverage summary (branches, worktrees,
+  files, shards, skipped / unreadable / refused) and writes summary.md into
+  .myco/results/<query-token>/. compare writes git's own unified diff per target
+  (diff.patch) and thread.md: every version of the file ordered by commit time
+  across branches, naming which branch changed which lines.
 
 INDEXING
       --no-refresh    search the existing index without refreshing first
       --no-gitignore  do not honour .gitignore
-      --max-size N    skip files larger than N megabytes (default 5)
+      --max-size N    optional: name-index only files larger than N MiB (default: no cap;
+                      any skip is listed in the index report)
+      --no-tracked-ignored  do not index git-tracked files that match .gitignore
+                      (default: tracked files are indexed anyway, and listed)
       --hash-oversize stream-hash over-size files (default off; never tokenized)
       --vendored      descend into vendored deps (node_modules; skipped + reported by default)
 
 Exit codes: 0 = matches, 1 = no matches, 2 = error.`;
+
+export const DEFAULT_SEARCH_LIMIT = 1000;
 
 function toOptions(values: Record<string, unknown>): {
   search: SearchOptions;
@@ -83,7 +109,7 @@ function toOptions(values: Record<string, unknown>): {
   else if (values["case-sensitive"]) caseSensitive = true;
 
   const context = Number.parseInt(String(values["context"] ?? "0"), 10);
-  const limit = Number.parseInt(String(values["limit"] ?? "200"), 10);
+  const limit = Number.parseInt(String(values["limit"] ?? String(DEFAULT_SEARCH_LIMIT)), 10);
   const maxMb = Number.parseFloat(String(values["max-size"] ?? ""));
 
   return {
@@ -91,7 +117,7 @@ function toOptions(values: Record<string, unknown>): {
       mode,
       caseSensitive,
       files: Boolean(values["files"]),
-      limit: Number.isFinite(limit) && limit > 0 ? limit : 200,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : DEFAULT_SEARCH_LIMIT,
       context: Number.isFinite(context) && context > 0 ? context : 0,
     },
     index: {
@@ -101,6 +127,7 @@ function toOptions(values: Record<string, unknown>): {
       useGitignore: !values["no-gitignore"],
       includeVendored: Boolean(values["vendored"]),
       hashOversize: Boolean(values["hash-oversize"]),
+      includeTrackedIgnored: !values["no-tracked-ignored"],
     },
   };
 }
@@ -111,7 +138,74 @@ function useColor(values: Record<string, unknown>): boolean {
   return Boolean(process.stdout.isTTY);
 }
 
-async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
+function filterFrom(values: Record<string, unknown>): TargetFilter {
+  const arr = (k: string): string[] => (Array.isArray(values[k]) ? (values[k] as string[]) : []);
+  return { branches: arr("branch"), worktrees: arr("worktree") };
+}
+
+async function cmdIndexFiltered(root: string, index: IndexOptions, filter: TargetFilter): Promise<number> {
+  if ((filter.branches?.length ?? 0) > 0) {
+    process.stderr.write(
+      "myco: index --branch is refused: branches are read straight from git objects at search/compare time "
+        + "and are never indexed on disk. Use `myco <pattern> --branch NAME` or `myco compare <path> --branch NAME`.\n",
+    );
+    return 2;
+  }
+  const top = await repoTop(root);
+  if (top === null) {
+    process.stderr.write(`myco: --worktree needs a git repo: ${root}\n`);
+    return 2;
+  }
+  const { targets, filterErrors } = await listTargets(top, filter);
+  if (filterErrors.length > 0) {
+    for (const e of filterErrors) process.stderr.write(`myco: ${e}\n`);
+    return 2;
+  }
+  let worst = 0;
+  for (const t of targets) {
+    process.stdout.write(`== worktree ${t.name} (${t.dir}) ==\n`);
+    const code = await cmdIndex(t.dir!, index, filter);
+    worst = Math.max(worst, code);
+  }
+  return worst;
+}
+
+async function printIndexCoverage(
+  root: string,
+  files: number,
+  skipped: string[],
+  unreadable: string[],
+  limited: TargetFilter | null,
+): Promise<void> {
+  const top = await repoTop(root);
+  const layout = await storedIndexLayout(root);
+  let branches = { searched: 0, total: 0 };
+  let worktrees = { searched: 0, total: 0 };
+  if (top !== null) {
+    const { all } = await listTargets(top);
+    // The on-disk index covers THIS working tree only; branches are covered at query time.
+    branches = { searched: 0, total: all.branches };
+    worktrees = { searched: 1, total: all.worktrees };
+  }
+  const coverage: Coverage = {
+    command: "index",
+    repo: top === null ? null : path.basename(top),
+    limited,
+    branches,
+    worktrees,
+    targets: [],
+    index: { files, layout: layout.layout, shards: layout.shards },
+    skipped,
+    unreadable,
+    refused: [],
+  };
+  process.stdout.write(renderCoverage(coverage) + "\n");
+  if (top !== null) {
+    process.stdout.write("  (branches are not indexed on disk; search/compare read every branch from git objects)\n");
+  }
+}
+
+async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter): Promise<number> {
   // Same fail-closed guard as cmdSearch: `myco index <nonexistent>` must not
   // mkdir `<root>/.myco` at a path that doesn't exist. Create nothing, exit 2.
   if (!(await fs.stat(root).catch(() => undefined))) {
@@ -125,6 +219,8 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
     skippedLargePaths,
     skippedVendoredDirs,
     omittedOverlongTermPaths,
+    unreadablePaths,
+    trackedIgnoredPaths,
   } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   // Informational output → stdout. stderr is reserved for real errors (which all
@@ -134,7 +230,9 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
     `indexed ${stats.files} files ` +
       `(+${stats.added} ~${stats.updated} -${stats.removed}, ` +
       `${stats.unchanged} unchanged, ${stats.skippedBinary} binary skipped, ` +
-      `${stats.skippedLarge} over-size skipped) ` +
+      `${stats.skippedLarge} over-size skipped` +
+      (index.maxFileSize < UNLIMITED_FILE_SIZE ? `, --max-size ${(index.maxFileSize / (1024 * 1024)).toFixed(0)} MiB` : `, no size limit`) +
+      `) ` +
       `in ${ms.toFixed(0)}ms\n`,
   );
   noteSaveOutcome(saved);
@@ -149,11 +247,19 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
   // No silent caps: name the files that fell outside the index, so a search that
   // returns nothing is never mistaken for "not present" (DESIGN §8/§10).
   if (skippedLargePaths.length > 0) {
-    const mib = (index.maxFileSize / (1024 * 1024)).toFixed(0);
+    const cap = index.maxFileSize < UNLIMITED_FILE_SIZE
+      ? `--max-size (${(index.maxFileSize / (1024 * 1024)).toFixed(0)} MiB) or the engine text limit`
+      : "the engine text limit (no --max-size set)";
     process.stdout.write(
-      `  ${skippedLargePaths.length} file(s) exceed --max-size (${mib} MiB) — NOT searchable:\n`,
+      `  ${skippedLargePaths.length} file(s) exceed ${cap} — name-indexed with an UNKNOWN marker, content NOT searchable:\n`,
     );
     for (const p of skippedLargePaths) process.stdout.write(`    ${p}\n`);
+  }
+  if (unreadablePaths.length > 0) {
+    process.stdout.write(
+      `  ${unreadablePaths.length} file(s) could not be read — NOT indexed:\n`,
+    );
+    for (const p of unreadablePaths) process.stdout.write(`    ${p}\n`);
   }
   // Same no-silent-caps rule for vendored trees: name the pruned dirs and the
   // escape hatch, so a miss inside node_modules can never read as absence.
@@ -163,6 +269,24 @@ async function cmdIndex(root: string, index: IndexOptions): Promise<number> {
     );
     for (const p of skippedVendoredDirs) process.stdout.write(`    ${p}\n`);
   }
+  if (trackedIgnoredPaths.length > 0) {
+    process.stdout.write(
+      `  ${trackedIgnoredPaths.length} git-tracked file(s) matched .gitignore and were indexed anyway `
+        + `(pass --no-tracked-ignored to exclude):\n`,
+    );
+    for (const p of trackedIgnoredPaths) process.stdout.write(`    ${p}\n`);
+  }
+  await printIndexCoverage(
+    root,
+    stats.files,
+    [
+      ...skippedLargePaths.map((p) => `content (over-size, name-indexed): ${p}`),
+      ...skippedVendoredDirs.map((p) => `vendored dir: ${p}`),
+      ...(stats.skippedBinary > 0 ? [`${stats.skippedBinary} binary file(s) (name-indexed only)`] : []),
+    ],
+    unreadablePaths,
+    filter && filterActive(filter) ? filter : null,
+  );
   return 0;
 }
 
@@ -194,7 +318,7 @@ async function cmdStatus(root: string): Promise<number> {
   const loaded = outcome;
   let bytes = 0;
   try {
-    bytes = (await fs.stat(path.join(root, ".myco", "index.json"))).size;
+    bytes = await storedIndexBytes(root);
   } catch {
     /* ignore */
   }
@@ -318,6 +442,66 @@ async function cmdSearch(
       }
     }
     outcome = await search(root, graph, pattern, sOpts);
+    let coveragePrinted = false;
+    if (!values["no-branches"] && !sOpts.files) {
+      const top = await repoTop(root);
+      if (top === null && filterActive(filterFrom(values))) {
+        process.stderr.write(`myco: --branch/--worktree need a git repo: ${root}\n`);
+        return 2;
+      }
+      if (top !== null) {
+        coveragePrinted = !values["json"];
+        const filter = filterFrom(values);
+        const tree = await searchTree(root, top, pattern, { mode: sOpts.mode, caseSensitive: sOpts.caseSensitive, filter });
+        if (tree.filterErrors.length > 0) {
+          for (const e of tree.filterErrors) process.stderr.write(`myco: ${e}\n`);
+          return 2;
+        }
+        if (!values["json"]) {
+          const layout = await storedIndexLayout(root);
+          tree.coverage.index = { files: [...graph.files()].length, layout: layout.layout, shards: layout.shards };
+          if (!isError(outcome) && outcome.longLineRefusals.length > 0) {
+            tree.coverage.refused.push(
+              ...outcome.longLineRefusals.map((r) => `TriRegex ${r.code} at ${r.path}:${r.line}: ${r.reason}`),
+            );
+          }
+          process.stdout.write(renderCoverage(tree.coverage) + "\n");
+        }
+        const failed = tree.results.filter((r) => r.status === "error");
+        if (!values["json"]) {
+          const total = tree.results.reduce((sum, r) => sum + r.hits, 0);
+          process.stdout.write(
+            `myco: results tree — ${tree.results.length} branch/worktree target(s), ${total} hit(s): ${tree.dir}\n`,
+          );
+          for (const r of tree.results) {
+            process.stdout.write(`    ${r.token}  ${r.status === "ok" ? `${r.hits} hit(s)` : `UNREADABLE: ${r.error}`}\n`);
+          }
+          for (const e of tree.errors) process.stdout.write(`    UNREADABLE: ${e}\n`);
+        }
+        if (failed.length > 0 || tree.errors.length > 0) {
+          process.stderr.write(`myco: ${failed.length + tree.errors.length} branch/worktree target(s) could not be read — see ${tree.dir}\n`);
+        }
+      }
+    }
+    if (!coveragePrinted && !values["json"]) {
+      const layout = await storedIndexLayout(root);
+      const top = await repoTop(root);
+      const reason = values["no-branches"] ? "--no-branches" : sOpts.files ? "--files" : null;
+      process.stdout.write(renderCoverage({
+        command: "search",
+        repo: top === null ? null : path.basename(top),
+        limited: null,
+        branches: { searched: 0, total: 0 },
+        worktrees: { searched: top === null ? 0 : 1, total: top === null ? 0 : 1 },
+        targets: [],
+        index: { files: [...graph.files()].length, layout: layout.layout, shards: layout.shards },
+        skipped: reason ? [`branches/other worktrees not searched (${reason})`] : [],
+        unreadable: [],
+        refused: !isError(outcome)
+          ? outcome.longLineRefusals.map((r) => `TriRegex ${r.code} at ${r.path}:${r.line}: ${r.reason}`)
+          : [],
+      }) + "\n");
+    }
   }
   if (isError(outcome)) {
     process.stderr.write(`myco: ${outcome.error}\n`);
@@ -341,10 +525,48 @@ async function cmdSearch(
     outcome.searchTimeBudgetExceeded ||
     outcome.regexTimedOut ||
     outcome.regexLinesTruncated > 0 ||
+    outcome.longLineRefusals.length > 0 ||
     !outcome.complete ||
     outcome.unknown.length > 0
   ) return 2;
   return outcome.matches.length > 0 ? 0 : 1;
+}
+
+async function cmdCompare(relPath: string | undefined, root: string, json: boolean, filter: TargetFilter): Promise<number> {
+  if (relPath === undefined) {
+    process.stderr.write("myco: compare needs a repo-relative <path>\n");
+    return 2;
+  }
+  const top = await repoTop(root);
+  if (top === null) {
+    process.stderr.write(`myco: compare needs a git repo: ${root}\n`);
+    return 2;
+  }
+  const result = await compareTree(root, top, relPath, filter);
+  if (result.filterErrors.length > 0) {
+    for (const e of result.filterErrors) process.stderr.write(`myco: ${e}\n`);
+    return 2;
+  }
+  if (json) {
+    process.stdout.write(JSON.stringify(result) + "\n");
+  } else {
+    process.stdout.write(
+      `compare ${relPath} vs ${result.base ? `${result.base.ref}@${result.base.commit.slice(0, 12)}` : "(no base)"}`
+        + `${result.baseMissing ? " (absent at base)" : ""} — ${result.dir}\n`,
+    );
+    for (const row of result.rows) {
+      process.stdout.write(`  ${row.state.padEnd(9)} ${row.token}  ${row.commit.slice(0, 12)}${row.detail ? `  ${row.detail}` : ""}\n`);
+    }
+    for (const e of result.errors) process.stdout.write(`  UNREADABLE: ${e}\n`);
+    process.stdout.write(`  thread: ${result.thread.length} version(s) by commit time — ${path.join(result.dir, "thread.md")}\n`);
+    process.stdout.write(renderCoverage(result.coverage) + "\n");
+  }
+  const bad = result.rows.filter((r) => r.state === "error").length + result.errors.length;
+  if (bad > 0) {
+    process.stderr.write(`myco: ${bad} branch/worktree target(s) could not be read\n`);
+    return 2;
+  }
+  return 0;
 }
 
 async function run(argv: string[]): Promise<number> {
@@ -366,8 +588,12 @@ async function run(argv: string[]): Promise<number> {
       "no-refresh": { type: "boolean" },
       "max-size": { type: "string" },
       "hash-oversize": { type: "boolean" },
+      "no-branches": { type: "boolean" },
       in: { type: "string", multiple: true },
       vendored: { type: "boolean" },
+      "no-tracked-ignored": { type: "boolean" },
+      branch: { type: "string", multiple: true },
+      worktree: { type: "string", multiple: true },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -386,8 +612,14 @@ async function run(argv: string[]): Promise<number> {
   const { index: iOpts } = toOptions(values);
 
   switch (first) {
-    case "index":
-      return cmdIndex(path.resolve(rest[0] ?? "."), iOpts);
+    case "index": {
+      const filter = filterFrom(values);
+      return filterActive(filter)
+        ? cmdIndexFiltered(path.resolve(rest[0] ?? "."), iOpts, filter)
+        : cmdIndex(path.resolve(rest[0] ?? "."), iOpts);
+    }
+    case "compare":
+      return cmdCompare(rest[0], path.resolve(rest[1] ?? "."), Boolean(values["json"]), filterFrom(values));
     case "status":
       return cmdStatus(path.resolve(rest[0] ?? "."));
     case "help":

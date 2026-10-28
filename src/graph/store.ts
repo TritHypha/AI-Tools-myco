@@ -9,7 +9,7 @@
 // absolute root path — it is derived from where the index file sits — so the
 // artifact never embeds a machine-specific path.
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
@@ -24,6 +24,96 @@ import type { TermCounts, UnknownMarker } from "./model.ts";
 const FORMAT = 1;
 export const INDEX_DIR = ".myco";
 export const INDEX_FILE = "index.json";
+// Sharded layout (written when the index exceeds one shard's budget): a manifest
+// listing index-NNN.json shards with sha256, byte length and counts. Loading
+// verifies EVERY shard and fails closed (rejected) on any mismatch or absence.
+export const MANIFEST_FILE = "index-manifest.json";
+export const SHARD_FORMAT = 2;
+export interface ShardBudget { maxEntries: number; maxChars: number; }
+export const DEFAULT_SHARD_BUDGET: Readonly<ShardBudget> = Object.freeze({
+  maxEntries: 250_000,
+  maxChars: 32 * 1024 * 1024,
+});
+const SHARD_NAME = /^index-(\d{3,})\.json$/;
+function shardName(i: number): string { return `index-${String(i).padStart(3, "0")}.json`; }
+
+interface ShardPiece extends StoredFile { c?: 1; }
+interface ManifestEntry { name: string; sha256: string; bytes: number; pieces: number; terms: number; }
+interface Manifest {
+  format: 2; kind: "myco-manifest"; createdAt: number;
+  fileCount: number; termEdges: number; shards: ManifestEntry[];
+}
+
+// Split stored files into shards. A file whose terms exceed the budget is split
+// into consecutive pieces (continuation pieces carry c:1 and only p/m/s/t).
+export function planShards(files: StoredFile[], budget: Readonly<ShardBudget>): ShardPiece[][] {
+  const shards: ShardPiece[][] = [];
+  let current: ShardPiece[] = [];
+  let entries = 0;
+  let chars = 0;
+  const flush = () => { if (current.length > 0) { shards.push(current); current = []; entries = 0; chars = 0; } };
+  for (const file of files) {
+    let piece: ShardPiece = { ...file, t: [] };
+    let first = true;
+    const startPiece = () => { entries += 1; chars += file.p.length + 64; };
+    if (entries + 1 > budget.maxEntries || chars + file.p.length + 64 > budget.maxChars) flush();
+    startPiece();
+    for (const term of file.t) {
+      const cost = term[0].length + 16;
+      if (entries + 1 > budget.maxEntries || chars + cost > budget.maxChars) {
+        if (piece.t.length > 0 || first) current.push(piece);
+        flush();
+        first = false;
+        piece = { p: file.p, m: file.m, s: file.s, t: [], c: 1 };
+        startPiece();
+      }
+      piece.t.push(term);
+      entries += 1;
+      chars += cost;
+    }
+    current.push(piece);
+  }
+  flush();
+  return shards;
+}
+
+async function atomicWrite(dir: string, name: string, data: string): Promise<void> {
+  const temporary = path.join(dir, `.${name}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    const handle = await fs.open(temporary, "wx");
+    try { await handle.writeFile(data, "utf8"); } finally { await handle.close(); }
+    await fs.rename(temporary, path.join(dir, name));
+  } catch (error: unknown) {
+    await fs.unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Stored layout for coverage summaries: legacy single file, or manifest + N shards. */
+export async function storedIndexLayout(root: string): Promise<{ layout: "none" | "legacy" | "sharded"; shards: number }> {
+  let names: string[];
+  try {
+    names = await fs.readdir(path.join(root, INDEX_DIR));
+  } catch {
+    return { layout: "none", shards: 0 };
+  }
+  if (names.includes(MANIFEST_FILE)) {
+    return { layout: "sharded", shards: names.filter((n) => SHARD_NAME.test(n)).length };
+  }
+  return names.includes(INDEX_FILE) ? { layout: "legacy", shards: 1 } : { layout: "none", shards: 0 };
+}
+
+/** Total bytes of the stored index (legacy single file or manifest + shards). */
+export async function storedIndexBytes(root: string): Promise<number> {
+  const dir = path.join(root, INDEX_DIR);
+  let total = 0;
+  for (const name of await fs.readdir(dir)) {
+    if (name === INDEX_FILE || name === MANIFEST_FILE || SHARD_NAME.test(name)) {
+      total += (await fs.stat(path.join(dir, name))).size;
+    }
+  }
+  return total;
+}
 
 export interface IndexMeta {
   createdAt: number;
@@ -52,6 +142,7 @@ export type SaveOutcome =
 export async function saveGraph(
   root: string,
   graph: SearchGraph,
+  budget: Readonly<ShardBudget> = DEFAULT_SHARD_BUDGET,
 ): Promise<SaveOutcome> {
   const files: StoredFile[] = [];
   for (const rec of graph.files()) {
@@ -112,22 +203,43 @@ export async function saveGraph(
   }
   const dir = path.join(root, INDEX_DIR);
   await fs.mkdir(dir, { recursive: true });
-  const destination = indexPath(root);
-  const temporary = path.join(
-    dir,
-    `.${INDEX_FILE}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
-  );
-  try {
-    const handle = await fs.open(temporary, "wx");
-    try {
-      await handle.writeFile(JSON.stringify(validated), "utf8");
-    } finally {
-      await handle.close();
+  const shards = planShards(validated.files, budget);
+  const existing = await fs.readdir(dir).catch(() => [] as string[]);
+  if (shards.length <= 1) {
+    // Fits one shard: keep the legacy single-file layout (format 1).
+    await atomicWrite(dir, INDEX_FILE, JSON.stringify(validated));
+    await fs.unlink(path.join(dir, MANIFEST_FILE)).catch(() => undefined);
+    for (const name of existing) {
+      if (SHARD_NAME.test(name)) await fs.unlink(path.join(dir, name)).catch(() => undefined);
     }
-    await fs.rename(temporary, destination);
-  } catch (error: unknown) {
-    await fs.unlink(temporary).catch(() => undefined);
-    throw error;
+    return { written: true };
+  }
+  const entries: ManifestEntry[] = [];
+  for (let i = 0; i < shards.length; i += 1) {
+    const name = shardName(i);
+    const text = JSON.stringify({ format: SHARD_FORMAT, kind: "myco-shard", index: i, files: shards[i] });
+    await atomicWrite(dir, name, text);
+    entries.push({
+      name,
+      sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+      bytes: Buffer.byteLength(text, "utf8"),
+      pieces: shards[i]!.length,
+      terms: shards[i]!.reduce((sum, piece) => sum + piece.t.length, 0),
+    });
+  }
+  const manifest: Manifest = {
+    format: 2,
+    kind: "myco-manifest",
+    createdAt: validated.createdAt,
+    fileCount: validated.files.length,
+    termEdges: validated.files.reduce((sum, file) => sum + file.t.length, 0),
+    shards: entries,
+  };
+  await atomicWrite(dir, MANIFEST_FILE, JSON.stringify(manifest));
+  await fs.unlink(path.join(dir, INDEX_FILE)).catch(() => undefined);
+  const keep = new Set(entries.map((entry) => entry.name));
+  for (const name of existing) {
+    if (SHARD_NAME.test(name) && !keep.has(name)) await fs.unlink(path.join(dir, name)).catch(() => undefined);
   }
   return { written: true };
 }
@@ -158,41 +270,9 @@ export async function loadGraphOutcome(
   | { status: "ok"; graph: SearchGraph; meta: IndexMeta }
   | { status: "absent" | "rejected" }
 > {
-  let text: string;
-  try {
-    const requestedIndex = indexPath(root);
-    const [realRoot, realIndex] = await Promise.all([
-      fs.realpath(root),
-      fs.realpath(requestedIndex),
-    ]);
-    const relativeIndex = path.relative(realRoot, realIndex);
-    if (
-      relativeIndex === ""
-      || relativeIndex === ".."
-      || relativeIndex.startsWith(`..${path.sep}`)
-      || path.isAbsolute(relativeIndex)
-    ) {
-      return { status: "rejected" };
-    }
-    const stat = await fs.lstat(requestedIndex);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      return { status: "rejected" };
-    }
-    text = await fs.readFile(requestedIndex, "utf8");
-  } catch (error: unknown) {
-    // Only a genuinely missing path is absence. Permission failures, invalid
-    // paths and I/O faults are rejected evidence, never a reassuring first run.
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-      return { status: "absent" };
-    }
-    return { status: "rejected" };
-  }
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(text) as unknown;
-  } catch {
-    return { status: "rejected" }; // a file IS there; it is corrupt, not missing
-  }
+  const read = await readStoredIndex(root);
+  if (read.status !== "ok") return { status: read.status };
+  const decoded = read.value;
   const data = validateStoredIndex(decoded);
   if (data === null) return { status: "rejected" };
 
@@ -233,4 +313,122 @@ export async function loadGraphOutcome(
       filesWithOmittedOverlongTerms: data.files.filter((file) => (file.o ?? 0) > 0).length,
     },
   };
+}
+
+// Read a file under <root>/.myco, refusing symlinks and paths escaping the root.
+async function readIndexFile(
+  root: string,
+  name: string,
+): Promise<{ status: "ok"; bytes: Buffer } | { status: "absent" | "rejected" }> {
+  try {
+    const requested = path.join(root, INDEX_DIR, name);
+    const [realRoot, realFile] = await Promise.all([fs.realpath(root), fs.realpath(requested)]);
+    const relative = path.relative(realRoot, realFile);
+    if (
+      relative === ""
+      || relative === ".."
+      || relative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relative)
+    ) {
+      return { status: "rejected" };
+    }
+    const stat = await fs.lstat(requested);
+    if (!stat.isFile() || stat.isSymbolicLink()) return { status: "rejected" };
+    return { status: "ok", bytes: await fs.readFile(requested) };
+  } catch (error: unknown) {
+    // Only a genuinely missing path is absence. Permission failures, invalid
+    // paths and I/O faults are rejected evidence, never a reassuring first run.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { status: "absent" };
+    return { status: "rejected" };
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Return the decoded format-1 shape, from the manifest+shards layout when a
+// manifest exists (every shard verified), else from legacy index.json.
+async function readStoredIndex(
+  root: string,
+): Promise<{ status: "ok"; value: unknown } | { status: "absent" | "rejected" }> {
+  const manifestRead = await readIndexFile(root, MANIFEST_FILE);
+  if (manifestRead.status === "rejected") return manifestRead;
+  if (manifestRead.status !== "ok") {
+    const legacy = await readIndexFile(root, INDEX_FILE);
+    if (legacy.status !== "ok") return legacy;
+    try {
+      return { status: "ok", value: JSON.parse(legacy.bytes.toString("utf8")) as unknown };
+    } catch {
+      return { status: "rejected" }; // a file IS there; it is corrupt, not missing
+    }
+  }
+  let manifest: unknown;
+  try { manifest = JSON.parse(manifestRead.bytes.toString("utf8")); } catch { return { status: "rejected" }; }
+  if (
+    !isPlainRecord(manifest)
+    || manifest.format !== 2
+    || manifest.kind !== "myco-manifest"
+    || typeof manifest.createdAt !== "number"
+    || !Number.isSafeInteger(manifest.fileCount)
+    || !Number.isSafeInteger(manifest.termEdges)
+    || !Array.isArray(manifest.shards)
+    || manifest.shards.length === 0
+  ) return { status: "rejected" };
+  const files: Array<Record<string, unknown>> = [];
+  let termEdges = 0;
+  for (let i = 0; i < manifest.shards.length; i += 1) {
+    const entry = manifest.shards[i] as unknown;
+    if (
+      !isPlainRecord(entry)
+      || entry.name !== shardName(i)
+      || typeof entry.sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(entry.sha256)
+      || !Number.isSafeInteger(entry.bytes)
+      || !Number.isSafeInteger(entry.pieces)
+      || !Number.isSafeInteger(entry.terms)
+    ) return { status: "rejected" };
+    const shardRead = await readIndexFile(root, entry.name);
+    // A MISSING shard is never "absent": the manifest says it exists.
+    if (shardRead.status !== "ok") return { status: "rejected" };
+    const bytes = shardRead.bytes;
+    if (
+      bytes.length !== entry.bytes
+      || createHash("sha256").update(bytes).digest("hex") !== entry.sha256
+    ) return { status: "rejected" };
+    let shard: unknown;
+    try { shard = JSON.parse(bytes.toString("utf8")); } catch { return { status: "rejected" }; }
+    if (
+      !isPlainRecord(shard)
+      || shard.format !== SHARD_FORMAT
+      || shard.kind !== "myco-shard"
+      || shard.index !== i
+      || !Array.isArray(shard.files)
+      || shard.files.length !== entry.pieces
+    ) return { status: "rejected" };
+    let shardTerms = 0;
+    for (const piece of shard.files as unknown[]) {
+      if (!isPlainRecord(piece) || !Array.isArray(piece.t)) return { status: "rejected" };
+      shardTerms += piece.t.length;
+      if (piece.c !== undefined) {
+        const prev = files[files.length - 1];
+        if (
+          piece.c !== 1
+          || Object.keys(piece).sort().join(",") !== "c,m,p,s,t"
+          || prev === undefined
+          || prev.p !== piece.p || prev.m !== piece.m || prev.s !== piece.s
+          || prev.k !== undefined
+        ) return { status: "rejected" };
+        for (const term of piece.t as unknown[]) (prev.t as unknown[]).push(term);
+      } else {
+        files.push({ ...piece, t: [...(piece.t as unknown[])] });
+      }
+    }
+    if (shardTerms !== entry.terms) return { status: "rejected" };
+    termEdges += shardTerms;
+  }
+  if (files.length !== manifest.fileCount || termEdges !== manifest.termEdges) {
+    return { status: "rejected" };
+  }
+  return { status: "ok", value: { format: 1, createdAt: manifest.createdAt, files } };
 }
