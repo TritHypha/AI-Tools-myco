@@ -163,7 +163,37 @@ myco reads files and writes only `./.myco/`. Notable choices:
   sort by term. `createdAt` remains observational metadata and is not semantic
   graph identity.
 - **Symlinks are not followed** during the walk — avoids cycles and escaping the
-  root.
+  root. The walk uses `lstat` for every file (a symlink swapped in between the
+  directory read and the stat is refused, not followed) and every symlink or
+  junction it meets is **listed** by `myco index` and in the coverage summary, so
+  a link's target is never silently missing (MYCO-HARD-1).
+- **Pinned-commit indexing (`myco index --at REV`, MYCO-HARD-1).** The index is
+  built from one commit's tree in git objects: `rev-parse --verify --end-of-options
+  REV^{commit}` must give a full SHA (empty, option-like, non-commit and unknown
+  revisions fail closed, exit 2, before anything is written), `ls-tree -r -z --long
+  --full-tree` lists the paths (NUL-separated, so odd names survive) and each file's
+  bytes come from `cat-file blob`, never the working folder. Mode 120000 entries
+  (symlinks) are listed and never followed; submodules (160000) and unknown modes
+  are listed as not indexed. The root must be the repository top. Incremental
+  reuse is off in this mode (there is no mtime to trust, and size alone cannot
+  prove a blob unchanged). `.git`/`.myco` paths are skipped as in the walk, but
+  `.gitignore`/`.mycoignore` rules are not applied: the commit IS the file list.
+  `--at` is refused on search/compare and with `--worktree`, rather than ignored.
+  Limitation: search still reads line text from the working folder, so a later
+  `myco search --no-refresh` shows working-folder lines for a pinned term graph.
+- **Secret guard (MYCO-HARD-1, on by default).** Before a term is stored, the
+  tokenizer classifies it (`src/ingest/secret-guard.ts`): known credential
+  shapes (GitHub, AWS key id, Stripe-style, Slack, Google API key, npm and
+  similar prefixes) and long high-entropy terms (at least 32 chars, a letter and
+  at least 4 digits, at least 4.0 bits/char after case folding) are **withheld**
+  from `.myco`. Pure hex (SHAs, sha256) and snake_case names whose segments are
+  letters, digits or at most 6 chars are kept. A withheld term is added to the
+  file's omission count, so content search re-reads that file directly and still
+  finds the value; `myco index` prints counts and paths, never the value.
+  `--no-secret-guard` stores everything. Heuristic, not a scanner: about 3-4% of
+  random 32-char lowercase tokens fall under the entropy floor, and the
+  withheld-path list covers files read in this run (unchanged reused files stay
+  visible through the omitted-term file list).
 - **No code execution, no network.** Pure Node built-ins; nothing is `eval`'d.
 - **Binary + size caps** bound memory and avoid junk terms — and the size cap is
   **visible, never silent**: over-size skips are counted in the index stats,

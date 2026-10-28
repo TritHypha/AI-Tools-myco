@@ -14,6 +14,17 @@ that the silence was the defect, not the narrowing.
 
 ### Added
 
+- **Hardening (MYCO-HARD-1, 2026-10-28).** `myco index --at REV` builds the index
+  from one commit's tree in git objects (full-SHA pin, fail closed on a bad or
+  option-like revision, repository top only, no incremental reuse, `--at` refused
+  on search/compare instead of ignored). Symlinks are never followed in either
+  mode and are now **listed** (walk uses `lstat`; committed 120000 entries are
+  reported); submodules and unknown tree modes are listed as not indexed. A
+  default-on secret guard withholds credential-shaped and long high-entropy terms
+  from `.myco` while search still finds them by direct re-read; `index` reports
+  counts and paths, never values. `--no-secret-guard` turns it off. Tests:
+  `test/secret-guard.test.ts`, `test/pinned-index.test.ts` (synthetic data only).
+
 - **Index everything.** No default size cap (`--max-size` stays optional and every
   skip is listed); search `--limit` defaults to 1000; sharded, no-loss index store
   (sha256 manifest; a tampered or missing shard fails closed; legacy `index.json`

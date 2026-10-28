@@ -91,6 +91,11 @@ INDEXING
                       (default: tracked files are indexed anyway, and listed)
       --hash-oversize stream-hash over-size files (default off; never tokenized)
       --vendored      descend into vendored deps (node_modules; skipped + reported by default)
+      --at REV        (index only) index the tree of commit REV from git objects, not the
+                      working folder; symlinks and submodules are listed, never followed.
+                      REV must resolve to a commit or the run fails (exit 2)
+      --no-secret-guard  store secret-looking terms in the index (default: withheld from
+                      .myco, reported by path; search still finds them by re-reading)
 
 Exit codes: 0 = matches, 1 = no matches, 2 = error.`;
 
@@ -128,6 +133,7 @@ function toOptions(values: Record<string, unknown>): {
       includeVendored: Boolean(values["vendored"]),
       hashOversize: Boolean(values["hash-oversize"]),
       includeTrackedIgnored: !values["no-tracked-ignored"],
+      withholdSecrets: !values["no-secret-guard"],
     },
   };
 }
@@ -221,6 +227,9 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     omittedOverlongTermPaths,
     unreadablePaths,
     trackedIgnoredPaths,
+    skippedSymlinkPaths,
+    withheldSecretPaths,
+    submodulePaths,
   } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   // Informational output → stdout. stderr is reserved for real errors (which all
@@ -230,6 +239,7 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     `indexed ${stats.files} files ` +
       `(+${stats.added} ~${stats.updated} -${stats.removed}, ` +
       `${stats.unchanged} unchanged, ${stats.skippedBinary} binary skipped, ` +
+      (stats.pinnedCommit ? `pinned commit ${stats.pinnedCommit}, ` : "") +
       `${stats.skippedLarge} over-size skipped` +
       (index.maxFileSize < UNLIMITED_FILE_SIZE ? `, --max-size ${(index.maxFileSize / (1024 * 1024)).toFixed(0)} MiB` : `, no size limit`) +
       `) ` +
@@ -239,7 +249,8 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
   if (stats.omittedOverlongTerms > 0) {
     process.stdout.write(
       `  ${stats.omittedOverlongTerms} overlong term(s) omitted from the term graph `
-        + `in ${stats.filesWithOmittedOverlongTerms} file(s); `
+        + `in ${stats.filesWithOmittedOverlongTerms} file(s) `
+        + `(this count includes secret-looking terms withheld by the secret guard); `
         + `those files are directly verified during content search:\n`,
     );
     for (const p of omittedOverlongTermPaths) process.stdout.write(`    ${p}\n`);
@@ -269,6 +280,27 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     );
     for (const p of skippedVendoredDirs) process.stdout.write(`    ${p}\n`);
   }
+  // MYCO-HARD-1: never silent about what the index does not hold.
+  if (withheldSecretPaths.length > 0) {
+    process.stdout.write(
+      `  ${stats.withheldSecretTerms} secret-looking term(s) in ${withheldSecretPaths.length} file(s) `
+        + `read this run were WITHHELD from the stored index (values never printed; search re-reads these files; `
+        + `pass --no-secret-guard to store them):\n`,
+    );
+    for (const p of withheldSecretPaths) process.stdout.write(`    ${p}\n`);
+  }
+  if (skippedSymlinkPaths.length > 0) {
+    process.stdout.write(
+      `  ${skippedSymlinkPaths.length} symlink(s) not followed - target content NOT indexed:\n`,
+    );
+    for (const p of skippedSymlinkPaths) process.stdout.write(`    ${p}\n`);
+  }
+  if (submodulePaths.length > 0) {
+    process.stdout.write(
+      `  ${submodulePaths.length} submodule or non-file tree entr(y/ies) not indexed (other repos):\n`,
+    );
+    for (const p of submodulePaths) process.stdout.write(`    ${p}\n`);
+  }
   if (trackedIgnoredPaths.length > 0) {
     process.stdout.write(
       `  ${trackedIgnoredPaths.length} git-tracked file(s) matched .gitignore and were indexed anyway `
@@ -282,6 +314,9 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     [
       ...skippedLargePaths.map((p) => `content (over-size, name-indexed): ${p}`),
       ...skippedVendoredDirs.map((p) => `vendored dir: ${p}`),
+      ...skippedSymlinkPaths.map((p) => `symlink (not followed): ${p}`),
+      ...submodulePaths.map((p) => `submodule / non-file entry: ${p}`),
+      ...withheldSecretPaths.map((p) => `secret-looking terms withheld from index (search re-reads): ${p}`),
       ...(stats.skippedBinary > 0 ? [`${stats.skippedBinary} binary file(s) (name-indexed only)`] : []),
     ],
     unreadablePaths,
@@ -592,6 +627,8 @@ async function run(argv: string[]): Promise<number> {
       in: { type: "string", multiple: true },
       vendored: { type: "boolean" },
       "no-tracked-ignored": { type: "boolean" },
+      at: { type: "string" },
+      "no-secret-guard": { type: "boolean" },
       branch: { type: "string", multiple: true },
       worktree: { type: "string", multiple: true },
       help: { type: "boolean", short: "h" },
@@ -610,10 +647,24 @@ async function run(argv: string[]): Promise<number> {
 
   const [first, ...rest] = positionals;
   const { index: iOpts } = toOptions(values);
+  if (values["at"] !== undefined && first !== "index") {
+    // Never silently ignore a pin: search/compare read the working folder and branches.
+    process.stderr.write("myco: --at is only valid with `myco index`\n");
+    return 2;
+  }
 
   switch (first) {
     case "index": {
       const filter = filterFrom(values);
+      if (values["at"] !== undefined) {
+        // Pinned-commit indexing reads ONE commit's tree; it does not combine with
+        // worktree filters (each worktree is a working folder, the opposite mode).
+        if (filterActive(filter)) {
+          process.stderr.write("myco: --at cannot be combined with --branch/--worktree\n");
+          return 2;
+        }
+        return cmdIndex(path.resolve(rest[0] ?? "."), { ...iOpts, atCommit: String(values["at"]) });
+      }
       return filterActive(filter)
         ? cmdIndexFiltered(path.resolve(rest[0] ?? "."), iOpts, filter)
         : cmdIndex(path.resolve(rest[0] ?? "."), iOpts);
