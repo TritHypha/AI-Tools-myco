@@ -28,6 +28,9 @@ import { linksCommand } from "./links.ts";
 import { compareTree, filterActive, listTargets, renderCoverage, repoTop, searchTree } from "./query/branches.ts";
 import type { Coverage, TargetFilter } from "./query/branches.ts";
 import { terminalData, terminalJson } from "./util/terminal.ts";
+import { writeIndexCoverage } from "./review/coverage-file.ts";
+import { loadRules, renderReviewText, reviewRepo } from "./review/check.ts";
+import { runAll } from "./review/run-all.ts";
 
 const HELP = `myco ${VERSION} — grep, but it grows a graph.
 
@@ -38,6 +41,16 @@ USAGE
   myco status [path]           show index statistics
   myco compare <path> [root]   compare one file across every branch + worktree vs main HEAD
   myco links watch <root> --snapshot <file>   foreground link monitor (links --help)
+  myco check [path]            review the index + .myco/results with fixed rules (alias: review)
+  myco run-all --config FILE   index + check every repo in FILE; combined status + history
+
+REVIEW (deterministic, no AI)
+      --rules FILE    review rules JSON (default: .myco/review-rules.json, then
+                      myco.config.json "review", then built-in defaults)
+      --out DIR       check: review dir (default .myco/review); run-all: status dir
+      --config FILE   run-all: repos config ({"repos":[{"path":".."}]})
+      --no-index      run-all: review only, skip the index step
+  check writes review.md, review.json and baseline.json. Exit: 0 PASS, 1 WARN, 2 FAIL.
 
 MATCHING
   (default)        whole-word match  (search "cat" ignores "concatenate")
@@ -309,6 +322,38 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     );
     for (const p of trackedIgnoredPaths) process.stdout.write(`    ${terminalData(p)}\n`);
   }
+  // Persist the coverage facts for `myco check` (counts + paths only, never content).
+  await writeIndexCoverage(root, {
+    createdAt: Date.now(),
+    pinnedCommit: stats.pinnedCommit ?? null,
+    saved: saved.written,
+    options: {
+      useGitignore: index.useGitignore,
+      includeVendored: Boolean(index.includeVendored),
+      includeTrackedIgnored: index.includeTrackedIgnored !== false,
+      withholdSecrets: index.withholdSecrets !== false,
+      maxFileSize: index.maxFileSize < UNLIMITED_FILE_SIZE ? index.maxFileSize : null,
+    },
+    stats: {
+      files: stats.files,
+      skippedBinary: stats.skippedBinary,
+      skippedLarge: stats.skippedLarge,
+      withheldSecretTerms: stats.withheldSecretTerms,
+      omittedOverlongTerms: stats.omittedOverlongTerms,
+    },
+    lists: {
+      overSize: skippedLargePaths,
+      unreadable: unreadablePaths,
+      vendoredDirs: skippedVendoredDirs,
+      symlinks: skippedSymlinkPaths,
+      submodules: submodulePaths,
+      withheldSecret: withheldSecretPaths,
+      trackedIgnored: trackedIgnoredPaths,
+      omittedOverlong: omittedOverlongTermPaths,
+    },
+  }).catch((e: unknown) => {
+    process.stdout.write(`myco: note — coverage summary for \`myco check\` NOT written: ${terminalData((e as Error).message)}\n`);
+  });
   await printIndexCoverage(
     root,
     stats.files,
@@ -633,6 +678,46 @@ async function cmdCompare(relPath: string | undefined, root: string, json: boole
   return 0;
 }
 
+async function cmdCheck(root: string, values: Record<string, unknown>): Promise<number> {
+  if (!(await fs.stat(root).catch(() => undefined))) {
+    process.stderr.write(`myco: path not found: ${terminalData(root)}\n`);
+    return 2;
+  }
+  let loaded;
+  try {
+    loaded = await loadRules(root, values["rules"] === undefined ? undefined : path.resolve(String(values["rules"])));
+  } catch (e) {
+    process.stderr.write(`myco: ${terminalData((e as Error).message)}\n`);
+    return 2;
+  }
+  const result = await reviewRepo(root, {
+    rules: loaded.rules,
+    rulesSource: loaded.source,
+    ...(values["out"] !== undefined ? { outDir: path.resolve(String(values["out"])) } : {}),
+  });
+  process.stdout.write((values["json"] ? terminalJson(result) : renderReviewText(result).split("\n").map((l) => terminalData(l)).join("\n")) + "\n");
+  return result.exitCode;
+}
+
+async function cmdRunAll(values: Record<string, unknown>): Promise<number> {
+  if (values["config"] === undefined) {
+    process.stderr.write("myco: run-all needs --config <file>\n");
+    return 2;
+  }
+  try {
+    const r = await runAll(path.resolve(String(values["config"])), {
+      ...(values["out"] !== undefined ? { outDir: path.resolve(String(values["out"])) } : {}),
+      noIndex: Boolean(values["no-index"]),
+    });
+    process.stdout.write(`myco run-all: ${r.status} — ${r.repos.length} repo(s); status: ${terminalData(path.join(r.outDir, "status.md"))}\n`);
+    for (const repo of r.repos) process.stdout.write(`  ${repo.status.padEnd(4)} ${terminalData(repo.name)}  ${terminalData(repo.reason)}\n`);
+    return r.exitCode;
+  } catch (e) {
+    process.stderr.write(`myco: ${terminalData((e as Error).message)}\n`);
+    return 2;
+  }
+}
+
 async function run(argv: string[]): Promise<number> {
   if (argv[0] === 'links') return linksCommand(argv.slice(1));
   const { values, positionals } = parseArgs({
@@ -660,6 +745,10 @@ async function run(argv: string[]): Promise<number> {
       "no-secret-guard": { type: "boolean" },
       branch: { type: "string", multiple: true },
       worktree: { type: "string", multiple: true },
+      rules: { type: "string" },
+      out: { type: "string" },
+      config: { type: "string" },
+      "no-index": { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
@@ -702,6 +791,11 @@ async function run(argv: string[]): Promise<number> {
       return cmdCompare(rest[0], path.resolve(rest[1] ?? "."), Boolean(values["json"]), filterFrom(values));
     case "status":
       return cmdStatus(path.resolve(rest[0] ?? "."));
+    case "check":
+    case "review":
+      return cmdCheck(path.resolve(rest[0] ?? "."), values);
+    case "run-all":
+      return cmdRunAll(values);
     case "help":
       process.stdout.write(HELP + "\n");
       return 0;

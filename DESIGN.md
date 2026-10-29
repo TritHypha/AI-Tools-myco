@@ -299,3 +299,34 @@ Where a **genuinely ternary** idea targets a real hot-path cost (both verified i
 **Not applicable (honest):** the governance three-valued logic (K3 authorization) and photonic acceleration are
 irrelevant to a local read-only search tool's speed. The word-query prune is already `Map`-fast; the 3rd axis speeds
 the *verify*, not the prune. Full assessment: KB `RD-0440`.
+
+## 13. Passive review (`myco check`, `myco run-all`)
+
+Goal: let a person (or a scheduler) confirm, without reading every file, that an
+index and its results tree are complete and well-formed. It is deliberately
+**not** AI: every check is a pure function of files on disk plus `git ls-files` /
+`ls-tree` / `rev-parse`, so the same state always gives the same verdict.
+
+- **Coverage is persisted.** `myco index` writes `.myco/index-coverage.json`
+  (options, counts, and sorted repo-relative path lists: over-size, unreadable,
+  vendored dirs, symlinks, submodules, withheld-secret, tracked-ignored, overlong).
+  No content and no secret values. An incremental index re-reads only changed files,
+  so withheld-secret and overlong lists are carried forward for files whose mtime is
+  older than the previous coverage file; pinned runs and a secret-guard option change
+  do not carry anything.
+- **Every gap must have a reason.** `index.vs-git` subtracts each explained
+  category from tracked-minus-indexed; anything left is FAIL by default. This is the
+  same principle as the rest of myco: a narrower answer must say it is narrower.
+- **Baseline without timestamps.** `baseline.json` holds metrics, symlinks and
+  per-check status only, so it changes only when the verdict changes. Growth and
+  regression checks compare against it.
+- **Rules are data and fail closed.** Unknown keys or wrong types in a rules file
+  are errors rather than ignored, so a typo cannot disable a check.
+- **run-all** spawns the same node binary and flags for `index`, keeps per-repo logs,
+  writes a combined status and appends to `history.jsonl` (append-only).
+- **Limitations.** Review is explicit (`check`) or scheduled (`run-all`); it does
+  not run after every search. Results counts are checked against the files myco
+  wrote, not re-searched. `index.age` uses the coverage file's time.
+- **Tests.** `test/review.test.ts` (RV-01..RV-20) builds synthetic repos and results
+  for every rule and exit code; `scripts/mutate-review.mjs` breaks 11 key rules and
+  requires the suite to catch each one.
