@@ -93,7 +93,7 @@ test("NUL parsers: git grep -z and worktree list -z", () => {
   assert.deepEqual(wts.map((w) => [w.dir, w.head, w.branch ?? null]), [["/r", "1", "main"], ["/r/w x", "2", null]]);
 });
 
-test("odd filenames are found exactly on a branch and compared with git diffs", { skip: !hasGit }, async () => {
+test("odd filenames are found exactly on a branch and compared with git diffs", { skip: !hasGit || process.platform === "win32" }, async () => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), "myco-odd-"));
   const repo = path.join(parent, "app");
   try {

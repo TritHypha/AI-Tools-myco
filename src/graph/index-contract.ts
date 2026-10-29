@@ -10,13 +10,18 @@ export const MAX_INDEX_TERMS_PER_FILE = Number.MAX_SAFE_INTEGER;
 // an explicit `o` marker (count) and is DIRECTLY verified at search time, so the
 // content is still searchable — never silently dropped — and the count is reported.
 export const MAX_INDEX_TERM_LENGTH = 4096;
+// Cache admission bound. Search builds may still index larger source trees in
+// memory; those trees do not get trusted from an unbounded persisted payload.
+export const MAX_INDEX_FILES = 250_000;
 
 export interface IndexLimits {
   maxTermsPerFile: number;
+  maxFiles?: number;
 }
 
 export const DEFAULT_INDEX_LIMITS: Readonly<IndexLimits> = Object.freeze({
   maxTermsPerFile: MAX_INDEX_TERMS_PER_FILE,
+  maxFiles: MAX_INDEX_FILES,
 });
 
 /** Optional content-skip tag on a stored file (format 1, additive).
@@ -93,6 +98,7 @@ export function validateStoredIndex(
     !Number.isSafeInteger(limits.maxTermsPerFile)
     || limits.maxTermsPerFile < 0
     || limits.maxTermsPerFile > MAX_INDEX_TERMS_PER_FILE
+    || (limits.maxFiles !== undefined && (!Number.isSafeInteger(limits.maxFiles) || limits.maxFiles < 0))
     || !isRecord(value)
     || !hasExactKeys(value, ["format", "createdAt", "files"])
     || value.format !== 1
@@ -100,6 +106,7 @@ export function validateStoredIndex(
     || !Number.isFinite(value.createdAt)
     || value.createdAt < 0
     || !Array.isArray(value.files)
+    || value.files.length > (limits.maxFiles ?? Number.MAX_SAFE_INTEGER)
   ) {
     return null;
   }

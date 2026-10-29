@@ -10,7 +10,7 @@ import {
   validateStoredIndex,
 } from "../src/graph/index-contract.ts";
 import { SearchGraph } from "../src/graph/model.ts";
-import { loadGraph, saveGraph } from "../src/graph/store.ts";
+import { loadGraph, loadGraphOutcome, saveGraph } from "../src/graph/store.ts";
 
 function validIndex(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -142,10 +142,14 @@ test("name-only content-skip tags round-trip (k=b / k=l) and refuse polluted row
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "myco-index-skip-"));
   try {
     // Valid name-only binary node.
+    const binaryPath = path.join(root, "assets", "pic.bin");
+    await fs.mkdir(path.dirname(binaryPath), { recursive: true });
+    await fs.writeFile(binaryPath, Buffer.from([0, 1, 2]));
+    const binaryStat = await fs.stat(binaryPath);
     await writeIndex(root, {
       format: 1,
       createdAt: 1,
-      files: [{ p: "assets/pic.bin", m: 1, s: 99, t: [], k: "b" }],
+      files: [{ p: "assets/pic.bin", m: binaryStat.mtimeMs, s: binaryStat.size, t: [], k: "b" }],
     });
     const loaded = await loadGraph(root);
     assert.ok(loaded);
@@ -222,6 +226,85 @@ test("a symlinked index directory cannot redirect cache reads outside the root",
       throw error;
     }
     assert.equal(await loadGraph(root), null);
+  } finally {
+    await fs.rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("cache loading refuses aggregate bytes above the admission budget before reading them", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "myco-cache-byte-cap-"));
+  const requested = path.join(root, ".myco", "index.json");
+  let readAttempted = false;
+  const lstat = fs.lstat.bind(fs);
+  const readFile = fs.readFile.bind(fs);
+  try {
+    await writeIndex(root, validIndex());
+    t.mock.method(fs, "lstat", async (...args: Parameters<typeof fs.lstat>) => {
+      const stat = await lstat(...args);
+      if (String(args[0]) === requested) stat.size = 128 * 1024 * 1024 + 1;
+      return stat;
+    });
+    t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === requested) readAttempted = true;
+      return readFile(...args);
+    });
+
+    assert.equal((await loadGraphOutcome(root)).status, "rejected");
+    assert.equal(readAttempted, false, "oversize cache bytes must be rejected before allocation");
+  } finally {
+    t.mock.restoreAll();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a text file cannot be hidden by a forged binary cache marker", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "myco-cache-binary-poison-"));
+  try {
+    const content = "needle is ordinary text\n";
+    const file = path.join(root, "text.txt");
+    await fs.writeFile(file, content);
+    const stat = await fs.stat(file);
+    await writeIndex(root, validIndex({ files: [{
+      p: "text.txt", m: stat.mtimeMs, s: stat.size, t: [], k: "b",
+    }] }));
+
+    assert.equal((await loadGraphOutcome(root)).status, "rejected");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the stored-index validator enforces the configured aggregate file count", () => {
+  const candidate = validIndex({ files: [
+    { p: "a.txt", m: 1, s: 1, t: [["alpha", 1]] },
+    { p: "b.txt", m: 1, s: 1, t: [["beta", 1]] },
+  ] });
+  const limits: any = { maxTermsPerFile: Number.MAX_SAFE_INTEGER, maxFiles: 1 };
+
+  assert.equal(validateStoredIndex(candidate, limits), null);
+});
+
+test("saveGraph refuses a symlinked .myco directory before writing outside the root", async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "myco-save-link-"));
+  const root = path.join(parent, "root");
+  const outside = path.join(parent, "outside-index");
+  try {
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    try {
+      await fs.symlink(outside, path.join(root, ".myco"), process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        t.skip("host cannot create a directory link for the containment test");
+        return;
+      }
+      throw error;
+    }
+    const graph = new SearchGraph();
+    graph.setFile("inside.txt", 1, 1, new Map([["needle", 1]]));
+
+    await assert.rejects(saveGraph(root, graph));
+    assert.deepEqual(await fs.readdir(outside), [], "the cache path must not write through the link");
   } finally {
     await fs.rm(parent, { recursive: true, force: true });
   }

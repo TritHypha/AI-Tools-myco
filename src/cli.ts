@@ -27,6 +27,7 @@ import { VERSION } from "./index.ts";
 import { linksCommand } from "./links.ts";
 import { compareTree, filterActive, listTargets, renderCoverage, repoTop, searchTree } from "./query/branches.ts";
 import type { Coverage, TargetFilter } from "./query/branches.ts";
+import { terminalData, terminalJson } from "./util/terminal.ts";
 
 const HELP = `myco ${VERSION} — grep, but it grows a graph.
 
@@ -85,8 +86,8 @@ GIT APPS (results tree)
 INDEXING
       --no-refresh    search the existing index without refreshing first
       --no-gitignore  do not honour .gitignore
-      --max-size N    optional: name-index only files larger than N MiB (default: no cap;
-                      any skip is listed in the index report)
+      --max-size N    optional content cap (default: no cap; tree scans keep names,
+                      direct-file searches report over-cap content as unknown)
       --no-tracked-ignored  do not index git-tracked files that match .gitignore
                       (default: tracked files are indexed anyway, and listed)
       --hash-oversize stream-hash over-size files (default off; never tokenized)
@@ -153,17 +154,17 @@ async function cmdIndexFiltered(root: string, index: IndexOptions, filter: Targe
   }
   const top = await repoTop(root);
   if (top === null) {
-    process.stderr.write(`myco: --worktree needs a git repo: ${root}\n`);
+    process.stderr.write(`myco: --worktree needs a git repo: ${terminalData(root)}\n`);
     return 2;
   }
   const { targets, filterErrors } = await listTargets(top, filter);
   if (filterErrors.length > 0) {
-    for (const e of filterErrors) process.stderr.write(`myco: ${e}\n`);
+    for (const e of filterErrors) process.stderr.write(`myco: ${terminalData(e)}\n`);
     return 2;
   }
   let worst = 0;
   for (const t of targets) {
-    process.stdout.write(`== worktree ${t.name} (${t.dir}) ==\n`);
+    process.stdout.write(`== worktree ${terminalData(t.name)} (${terminalData(t.dir ?? "")}) ==\n`);
     const code = await cmdIndex(t.dir!, index, filter);
     worst = Math.max(worst, code);
   }
@@ -209,7 +210,7 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
   // Same fail-closed guard as cmdSearch: `myco index <nonexistent>` must not
   // mkdir `<root>/.myco` at a path that doesn't exist. Create nothing, exit 2.
   if (!(await fs.stat(root).catch(() => undefined))) {
-    process.stderr.write(`myco: path not found: ${root}\n`);
+    process.stderr.write(`myco: path not found: ${terminalData(root)}\n`);
     return 2;
   }
   const started = process.hrtime.bigint();
@@ -242,7 +243,7 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
         + `in ${stats.filesWithOmittedOverlongTerms} file(s); `
         + `those files are directly verified during content search:\n`,
     );
-    for (const p of omittedOverlongTermPaths) process.stdout.write(`    ${p}\n`);
+    for (const p of omittedOverlongTermPaths) process.stdout.write(`    ${terminalData(p)}\n`);
   }
   // No silent caps: name the files that fell outside the index, so a search that
   // returns nothing is never mistaken for "not present" (DESIGN §8/§10).
@@ -253,13 +254,13 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     process.stdout.write(
       `  ${skippedLargePaths.length} file(s) exceed ${cap} — name-indexed with an UNKNOWN marker, content NOT searchable:\n`,
     );
-    for (const p of skippedLargePaths) process.stdout.write(`    ${p}\n`);
+    for (const p of skippedLargePaths) process.stdout.write(`    ${terminalData(p)}\n`);
   }
   if (unreadablePaths.length > 0) {
     process.stdout.write(
       `  ${unreadablePaths.length} file(s) could not be read — NOT indexed:\n`,
     );
-    for (const p of unreadablePaths) process.stdout.write(`    ${p}\n`);
+    for (const p of unreadablePaths) process.stdout.write(`    ${terminalData(p)}\n`);
   }
   // Same no-silent-caps rule for vendored trees: name the pruned dirs and the
   // escape hatch, so a miss inside node_modules can never read as absence.
@@ -267,14 +268,14 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     process.stdout.write(
       `  ${skippedVendoredDirs.length} vendored dir(s) skipped (NOT searchable; pass --vendored to include):\n`,
     );
-    for (const p of skippedVendoredDirs) process.stdout.write(`    ${p}\n`);
+    for (const p of skippedVendoredDirs) process.stdout.write(`    ${terminalData(p)}\n`);
   }
   if (trackedIgnoredPaths.length > 0) {
     process.stdout.write(
       `  ${trackedIgnoredPaths.length} git-tracked file(s) matched .gitignore and were indexed anyway `
         + `(pass --no-tracked-ignored to exclude):\n`,
     );
-    for (const p of trackedIgnoredPaths) process.stdout.write(`    ${p}\n`);
+    for (const p of trackedIgnoredPaths) process.stdout.write(`    ${terminalData(p)}\n`);
   }
   await printIndexCoverage(
     root,
@@ -294,6 +295,13 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
 // persisted. Informational → stdout; the search itself still succeeded.
 function noteSaveOutcome(saved: SaveOutcome): void {
   if (saved.written) return;
+  if (saved.reason === "resource-limit") {
+    process.stdout.write(
+      "myco: note — index NOT cached: the persisted-index resource limit was exceeded. "
+        + "Results are still searched from the in-memory graph.\n",
+    );
+    return;
+  }
   process.stdout.write(
     "myco: note — index NOT cached: generated graph violates the stored-index contract. "
       + "Results are correct, but the cache was refused before writing.\n",
@@ -308,10 +316,10 @@ async function cmdStatus(root: string): Promise<number> {
     // both as "no index" sends the user to the wrong fix.
     process.stderr.write(
       outcome.status === "rejected"
-        ? `index at ${path.join(root, ".myco")} exists but was REFUSED `
+        ? `index at ${terminalData(path.join(root, ".myco"))} exists but was REFUSED `
           + `(malformed or incompatible format) — `
           + `delete it and run: myco index\n`
-        : `no index at ${path.join(root, ".myco")} — run: myco index\n`,
+        : `no index at ${terminalData(path.join(root, ".myco"))} — run: myco index\n`,
     );
     return 2;
   }
@@ -345,6 +353,7 @@ async function cmdSearch(
     return 2;
   }
   const { search: sOpts, index: iOpts } = toOptions(values);
+  sOpts.maxFileSize = iOpts.maxFileSize;
 
   // --in is a coverage cap. If it cannot be honoured exactly as written, STOP —
   // never fall back to searching everything. A filter that silently widens is the
@@ -354,7 +363,7 @@ async function cmdSearch(
   if (inPatterns !== undefined) {
     const built = buildPathFilter(inPatterns);
     if (typeof built === "string") {
-      process.stderr.write(`myco: ${built}\n`);
+    process.stderr.write(`myco: ${terminalData(built)}\n`);
       return 2;
     }
     sOpts.pathFilter = built;
@@ -382,10 +391,13 @@ async function cmdSearch(
     // search with a filesystem side effect (a typo'd path becomes a stray dir, and
     // the created dir can then be picked up by a test-runner glob → spurious failure).
     // Fail closed: report and create nothing.
-    process.stderr.write(`myco: path not found: ${root}\n`);
+    process.stderr.write(`myco: path not found: ${terminalData(root)}\n`);
     return 2;
   }
   let outcome: SearchOutcome;
+  let unreadableDuringRefresh: string[] = [];
+  let skippedLargeDuringRefresh: string[] = [];
+  let skippedVendoredDuringRefresh: string[] = [];
   if (targetStat?.isFile()) {
     // --in scopes a TREE; the target here is one named file, so the flag can only
     // be a mistake — either the user meant a different root, or they expect a
@@ -411,17 +423,20 @@ async function cmdSearch(
       // "first run" is how a rejected cache stayed invisible: the message
       // was reassuring, identical every time, and pointed at nothing to fix.
       const prior = await loadGraphOutcome(root);
-      if (prior.status === "rejected") {
+      if (prior.status === "rejected" && !values["json"]) {
         process.stdout.write(
-          `myco: existing index at ${path.join(path.resolve(root), ".myco")} was REFUSED `
+          `myco: existing index at ${terminalData(path.join(path.resolve(root), ".myco"))} was REFUSED `
             + `(malformed or incompatible format) — re-indexing…\n`,
         );
-      } else if (prior.status === "absent") {
+      } else if (prior.status === "absent" && !values["json"]) {
         // Informational note → stdout (stderr is errors only).
-        process.stdout.write(`myco: indexing ${path.resolve(root)} (first run)…\n`);
+        process.stdout.write(`myco: indexing ${terminalData(path.resolve(root))} (first run)…\n`);
       }
       const built = await buildIndex(root, iOpts);
       graph = built.graph;
+      unreadableDuringRefresh = built.unreadablePaths;
+      skippedLargeDuringRefresh = built.skippedLargePaths;
+      skippedVendoredDuringRefresh = built.skippedVendoredDirs;
       if (!values["json"]) noteSaveOutcome(built.saved);
       // Surface an over-size skip even on the search path — otherwise an oversized file
       // silently misses and a zero-result reads as "absent" (the recurring "we keep
@@ -442,11 +457,25 @@ async function cmdSearch(
       }
     }
     outcome = await search(root, graph, pattern, sOpts);
+    if (!isError(outcome) && unreadableDuringRefresh.length > 0) {
+      const unreadablePaths = [...new Set([...(outcome.unreadablePaths ?? []), ...unreadableDuringRefresh])];
+      outcome = { ...outcome, complete: false, unreadablePaths };
+    }
+    if (!isError(outcome) && (skippedLargeDuringRefresh.length > 0 || skippedVendoredDuringRefresh.length > 0)) {
+      outcome = {
+        ...outcome,
+        complete: false,
+        skippedCoverage: {
+          largePaths: skippedLargeDuringRefresh,
+          vendoredDirs: skippedVendoredDuringRefresh,
+        },
+      };
+    }
     let coveragePrinted = false;
     if (!values["no-branches"] && !sOpts.files) {
       const top = await repoTop(root);
       if (top === null && filterActive(filterFrom(values))) {
-        process.stderr.write(`myco: --branch/--worktree need a git repo: ${root}\n`);
+      process.stderr.write(`myco: --branch/--worktree need a git repo: ${terminalData(root)}\n`);
         return 2;
       }
       if (top !== null) {
@@ -454,7 +483,7 @@ async function cmdSearch(
         const filter = filterFrom(values);
         const tree = await searchTree(root, top, pattern, { mode: sOpts.mode, caseSensitive: sOpts.caseSensitive, filter });
         if (tree.filterErrors.length > 0) {
-          for (const e of tree.filterErrors) process.stderr.write(`myco: ${e}\n`);
+          for (const e of tree.filterErrors) process.stderr.write(`myco: ${terminalData(e)}\n`);
           return 2;
         }
         if (!values["json"]) {
@@ -474,12 +503,12 @@ async function cmdSearch(
             `myco: results tree — ${tree.results.length} branch/worktree target(s), ${total} hit(s): ${tree.dir}\n`,
           );
           for (const r of tree.results) {
-            process.stdout.write(`    ${r.token}  ${r.status === "ok" ? `${r.hits} hit(s)` : `UNREADABLE: ${r.error}`}\n`);
+            process.stdout.write(`    ${terminalData(r.token)}  ${r.status === "ok" ? `${r.hits} hit(s)` : `UNREADABLE: ${terminalData(r.error ?? "")}`}\n`);
           }
-          for (const e of tree.errors) process.stdout.write(`    UNREADABLE: ${e}\n`);
+          for (const e of tree.errors) process.stdout.write(`    UNREADABLE: ${terminalData(e)}\n`);
         }
         if (failed.length > 0 || tree.errors.length > 0) {
-          process.stderr.write(`myco: ${failed.length + tree.errors.length} branch/worktree target(s) could not be read — see ${tree.dir}\n`);
+          process.stderr.write(`myco: ${failed.length + tree.errors.length} branch/worktree target(s) could not be read — see ${terminalData(tree.dir)}\n`);
         }
       }
     }
@@ -504,7 +533,7 @@ async function cmdSearch(
     }
   }
   if (isError(outcome)) {
-    process.stderr.write(`myco: ${outcome.error}\n`);
+    process.stderr.write(`myco: ${terminalData(outcome.error)}\n`);
     return 2;
   }
 
@@ -539,26 +568,26 @@ async function cmdCompare(relPath: string | undefined, root: string, json: boole
   }
   const top = await repoTop(root);
   if (top === null) {
-    process.stderr.write(`myco: compare needs a git repo: ${root}\n`);
+    process.stderr.write(`myco: compare needs a git repo: ${terminalData(root)}\n`);
     return 2;
   }
   const result = await compareTree(root, top, relPath, filter);
   if (result.filterErrors.length > 0) {
-    for (const e of result.filterErrors) process.stderr.write(`myco: ${e}\n`);
+    for (const e of result.filterErrors) process.stderr.write(`myco: ${terminalData(e)}\n`);
     return 2;
   }
   if (json) {
-    process.stdout.write(JSON.stringify(result) + "\n");
+    process.stdout.write(terminalJson(result) + "\n");
   } else {
     process.stdout.write(
-      `compare ${relPath} vs ${result.base ? `${result.base.ref}@${result.base.commit.slice(0, 12)}` : "(no base)"}`
-        + `${result.baseMissing ? " (absent at base)" : ""} — ${result.dir}\n`,
+      `compare ${terminalData(relPath)} vs ${result.base ? `${terminalData(result.base.ref)}@${result.base.commit.slice(0, 12)}` : "(no base)"}`
+        + `${result.baseMissing ? " (absent at base)" : ""} — ${terminalData(result.dir)}\n`,
     );
     for (const row of result.rows) {
-      process.stdout.write(`  ${row.state.padEnd(9)} ${row.token}  ${row.commit.slice(0, 12)}${row.detail ? `  ${row.detail}` : ""}\n`);
+      process.stdout.write(`  ${row.state.padEnd(9)} ${terminalData(row.token)}  ${row.commit.slice(0, 12)}${row.detail ? `  ${terminalData(row.detail)}` : ""}\n`);
     }
-    for (const e of result.errors) process.stdout.write(`  UNREADABLE: ${e}\n`);
-    process.stdout.write(`  thread: ${result.thread.length} version(s) by commit time — ${path.join(result.dir, "thread.md")}\n`);
+    for (const e of result.errors) process.stdout.write(`  UNREADABLE: ${terminalData(e)}\n`);
+    process.stdout.write(`  thread: ${result.thread.length} version(s) by commit time — ${terminalData(path.join(result.dir, "thread.md"))}\n`);
     process.stdout.write(renderCoverage(result.coverage) + "\n");
   }
   const bad = result.rows.filter((r) => r.state === "error").length + result.errors.length;
@@ -650,6 +679,6 @@ run(process.argv.slice(2))
     process.exitCode = code;
   })
   .catch((e: unknown) => {
-    process.stderr.write(`myco: ${(e as Error).message}\n`);
+    process.stderr.write(`myco: ${terminalData((e as Error).message)}\n`);
     process.exitCode = 2;
   });

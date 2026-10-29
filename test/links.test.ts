@@ -105,7 +105,7 @@ test('Windows Temp path is identified; missing target is broken only on a compat
   try {
     await fs.writeFile(path.join(f.root, 'notes.md'), '`C:\\Users\\myco-controlled-fixture\\AppData\\Local\\Temp\\absent.txt`');
     const s = await scanLinks(f.root);
-    assert(s.findings.some(x => x.temp && x.kind === (process.platform === 'win32' ? 'BROKEN' : 'UNAVAILABLE')));
+    assert(s.findings.some(x => x.temp && x.kind === (process.platform === 'win32' ? 'EXCLUDED' : 'UNAVAILABLE')));
     await fs.mkdir(path.join(f.root, 'Temp'));
     await fs.writeFile(path.join(f.root, 'Temp', 'exists.txt'), 'synthetic');
     await fs.writeFile(path.join(f.root, 'notes.md'), '[fragile](Temp/exists.txt)');
@@ -150,14 +150,14 @@ test('events during a blocked scan cause exactly one prompt follow-up without pe
     await fs.writeFile(target, 'synthetic');
     await fs.writeFile(path.join(f.root, 'notes.md'), '[x](receipt.bin)');
     m = await startLinkMonitor(f.root, f.snapshot, { intervalMs: 600000, debounceMs: 10 }, false);
-    const stat = fs.stat.bind(fs);
+    const lstat = fs.lstat.bind(fs);
     const timeout = setTimeout;
     let entered = deferred(), debounceFired = deferred(), blockNext = false, targetChecks = 0;
-    t.mock.method(fs, 'stat', async (...args: Parameters<typeof fs.stat>) => {
-      if (String(args[0]) !== target) return stat(...args);
+    t.mock.method(fs, 'lstat', async (...args: Parameters<typeof fs.lstat>) => {
+      if (String(args[0]) !== target) return lstat(...args);
       targetChecks++;
       // Capture the real pre-mutation result, then hold this specific I/O step.
-      const outcome = await stat(...args).then(value => ({ value }), error => ({ error }));
+      const outcome = await lstat(...args).then(value => ({ value }), error => ({ error }));
       if (blockNext) { blockNext = false; entered.resolve(); await release.promise; }
       if ('error' in outcome) throw outcome.error;
       return outcome.value;
@@ -245,30 +245,26 @@ test('source reads allocate stat size plus one; growth, shrinkage and byte caps 
   } finally { t.mock.restoreAll(); await fs.rm(f.base, { recursive: true, force: true }); }
 });
 
-test('outside-root references are checked by periodic reconciliation, not directory notifications', async () => {
-  const f = await fixture(); let m: Awaited<ReturnType<typeof startLinkMonitor>> | undefined;
+test('outside-root references are excluded without probing target existence', async t => {
+  const f = await fixture();
   try {
     const target = path.join(f.base, 'external.bin');
-    await fs.writeFile(target, 'synthetic');
     await fs.writeFile(path.join(f.root, 'notes.md'), '[external](../external.bin)');
-    const scan = await scanLinks(f.root);
-    assert.deepEqual(scan.findings, []);
-    assert(!scan.directories.includes(f.base), 'outside parent is not a watched source directory');
-    m = await startLinkMonitor(f.root, f.snapshot, { intervalMs: 600000, debounceMs: 10 });
-    const clean = await until(f.snapshot, s => s.status === 'CLEAN');
-    await fs.unlink(target);
-    // No event is delivered to the source-root watchers by this sibling mutation.
-    await new Promise(r => setTimeout(r, 100));
-    const unchanged = JSON.parse(await fs.readFile(f.snapshot, 'utf8'));
-    assert.equal(unchanged.sequence, clean.sequence);
-    assert.equal(unchanged.status, 'CLEAN', 'a historical scan can remain clean before the next cycle');
-    await m.stop();
-    await fs.writeFile(target, 'restored');
-    m = await startLinkMonitor(f.root, f.snapshot, { intervalMs: 200, debounceMs: 10 });
-    await until(f.snapshot, s => s.status === 'CLEAN');
-    await fs.unlink(target);
-    await until(f.snapshot, s => s.status === 'FINDINGS' && s.findings.some((x: any) => x.kind === 'BROKEN' && x.target === '../external.bin'), 2000);
-    await fs.writeFile(target, 'restored again');
-    await until(f.snapshot, s => s.status === 'CLEAN', 2000);
-  } finally { try { await m?.stop(); } finally { await fs.rm(f.base, { recursive: true, force: true }); } }
+    let outsideStatCalls = 0;
+    const stat = fs.stat.bind(fs);
+    t.mock.method(fs, 'stat', async (...args: Parameters<typeof fs.stat>) => {
+      if (path.resolve(String(args[0])) === target) outsideStatCalls++;
+      return stat(...args);
+    });
+    const absent = await scanLinks(f.root);
+    await fs.writeFile(target, 'synthetic');
+    const present = await scanLinks(f.root);
+
+    assert.deepEqual(absent.findings.map(x => x.kind), ['EXCLUDED']);
+    assert.deepEqual(present.findings.map(x => x.kind), ['EXCLUDED']);
+    assert.deepEqual(absent.issues, []);
+    assert.deepEqual(present.issues, []);
+    assert(!present.directories.includes(f.base), 'outside parents are never traversed');
+    assert.equal(outsideStatCalls, 0, 'outside target metadata is never queried');
+  } finally { t.mock.restoreAll(); await fs.rm(f.base, { recursive: true, force: true }); }
 });

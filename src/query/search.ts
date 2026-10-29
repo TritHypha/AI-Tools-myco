@@ -34,6 +34,8 @@ export interface SearchOptions {
   files: boolean; // search file paths instead of file contents
   limit: number;
   context: number; // lines of context on each side (content search only)
+  /** Optional direct-file content cap in bytes; over-cap content is UNKNOWN. */
+  maxFileSize?: number;
   // Restrict the search to part of the tree (`--in`). A user-requested coverage
   // cap, so the result reports what it removed — see pathFilterExcluded below.
   pathFilter?: PathFilter;
@@ -92,6 +94,10 @@ export interface SearchResult {
   pathFilterMatchedNothing: boolean;
   /** INDEXED_UNKNOWN over-size nodes in scope. Never treat as absence. */
   unknown: UnknownSearchHit[];
+  /** Source files that could not be read after their paths entered search scope. */
+  unreadablePaths?: string[];
+  /** Files/directories omitted by the index refresh that supplied this result. */
+  skippedCoverage?: { largePaths: string[]; vendoredDirs: string[] };
   /** Fail-closed: false whenever unknown is non-empty or coverage is incomplete. */
   complete: boolean;
 }
@@ -155,13 +161,15 @@ function resultComplete(
     regexTimedOut: boolean;
     regexLinesTruncated: number;
     longLineRefusals: LongLineRefusal[];
+    unreadablePaths?: string[];
   },
 ): boolean {
   return unknown.length === 0
     && !flags.searchTimeBudgetExceeded
     && !flags.regexTimedOut
     && flags.regexLinesTruncated === 0
-    && flags.longLineRefusals.length === 0;
+    && flags.longLineRefusals.length === 0
+    && (flags.unreadablePaths?.length ?? 0) === 0;
 }
 
 function withUnknown(
@@ -402,12 +410,12 @@ async function matchFile(
   context: number,
   loose?: RegExp,
   lit?: LiteralQuery,
-): Promise<{ hits: Match[]; excludedByBoundary: boolean; refusals: LongLineRefusal[] }> {
+): Promise<{ hits: Match[]; excludedByBoundary: boolean; refusals: LongLineRefusal[]; unreadable: boolean }> {
   let text: string;
   try {
     text = await fs.readFile(absPath, "utf8");
   } catch {
-    return { hits: [], excludedByBoundary: false, refusals: [] };
+    return { hits: [], excludedByBoundary: false, refusals: [], unreadable: true };
   }
   const lines = text.split("\n");
   const out: Match[] = [];
@@ -443,7 +451,7 @@ async function matchFile(
   // zero-hit candidates only.
   const excludedByBoundary =
     out.length === 0 && loose !== undefined && loose.test(text);
-  return { hits: out, excludedByBoundary, refusals };
+  return { hits: out, excludedByBoundary, refusals, unreadable: false };
 }
 
 async function matchFileRegex(
@@ -460,6 +468,7 @@ async function matchFileRegex(
   regexTimedOut: boolean;
   hitLimitReached: boolean;
   refusals: LongLineRefusal[];
+  unreadable: boolean;
 }> {
   let text: string;
   try {
@@ -471,6 +480,7 @@ async function matchFileRegex(
       regexTimedOut: false,
       hitLimitReached: false,
       refusals: [],
+      unreadable: true,
     };
   }
   const lines = text.split("\n");
@@ -497,7 +507,7 @@ async function matchFileRegex(
           });
         }
         if (out.length >= maxHits) {
-          return { hits: out, regexLinesTruncated, regexTimedOut: false, hitLimitReached: true, refusals };
+          return { hits: out, regexLinesTruncated, regexTimedOut: false, hitLimitReached: true, refusals, unreadable: false };
         }
         continue;
       }
@@ -517,6 +527,7 @@ async function matchFileRegex(
         regexTimedOut: true,
         hitLimitReached: false,
         refusals,
+        unreadable: false,
       };
     }
     for (const hit of scanned.hits) {
@@ -537,6 +548,7 @@ async function matchFileRegex(
         regexTimedOut: false,
         hitLimitReached: true,
         refusals,
+        unreadable: false,
       };
     }
   }
@@ -546,6 +558,7 @@ async function matchFileRegex(
     regexTimedOut: false,
     hitLimitReached: false,
     refusals,
+    unreadable: false,
   };
 }
 
@@ -780,6 +793,7 @@ export async function search(
 
   const all: Match[] = [];
   const filesMatched = new Set<string>();
+  const unreadablePaths: string[] = [];
   const startedAt = Date.now();
   let budgetExceeded = false;
   let regexTimedOut = false;
@@ -817,6 +831,7 @@ export async function search(
           Math.min(REGEX_OPERATION_TIME_BUDGET_MS, remaining),
           { pattern: query, ignoreCase: !sensitive },
         );
+        if (scanned.unreadable) unreadablePaths.push(rec.path);
         hits = scanned.hits;
         regexLinesTruncated += scanned.regexLinesTruncated;
         longLineRefusals.push(...scanned.refusals);
@@ -839,6 +854,7 @@ export async function search(
         hits = matchedFile.hits;
         excludedByBoundary = matchedFile.excludedByBoundary;
         longLineRefusals.push(...matchedFile.refusals);
+        if (matchedFile.unreadable) unreadablePaths.push(rec.path);
       }
     if (hits.length > 0) {
       filesMatched.add(rec.path);
@@ -882,6 +898,7 @@ export async function search(
     prunedToZero: ids !== null && unfiltered.length === 0,
     pathFilterExcluded: pathExcluded,
     pathFilterMatchedNothing: filterMatchedNothing,
+    ...(unreadablePaths.length > 0 ? { unreadablePaths } : {}),
   });
 }
 
@@ -896,6 +913,34 @@ export async function searchFile(
   opts: SearchOptions,
 ): Promise<SearchOutcome> {
   if (query === "") return { error: "empty query" };
+  let fileStat: import("node:fs").Stats;
+  try {
+    fileStat = await fs.lstat(absFile);
+  } catch {
+    return { error: "file unavailable" };
+  }
+  if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+    return { error: "explicit search target must be a regular, non-symlink file" };
+  }
+  const maxFileSize = opts.maxFileSize ?? Number.POSITIVE_INFINITY;
+  if (!Number.isSafeInteger(maxFileSize) && maxFileSize !== Number.POSITIVE_INFINITY) {
+    return { error: "invalid direct-file size limit" };
+  }
+  if (maxFileSize < 0) return { error: "invalid direct-file size limit" };
+  if (!opts.files && fileStat.size > maxFileSize) {
+    const unknown: UnknownSearchHit = {
+      path: path.basename(absFile), size: fileStat.size, type: "UNKNOWN",
+      state: "INDEXED_UNKNOWN", reason: "OVERSIZE", thresholdBytes: maxFileSize,
+    };
+    const result = emptyUnknownResult({
+      matches: [], filesSearched: 0, filesMatched: 0, truncated: true,
+      resultLimitExceeded: false, searchTimeBudgetExceeded: false,
+      regexTimedOut: false, regexLinesTruncated: 0, longLineRefusals: [],
+      wordBoundaryExcluded: 0, prunedToZero: false, pathFilterExcluded: 0,
+      pathFilterMatchedNothing: false,
+    });
+    return { ...result, unknown: [unknown], complete: false };
+  }
   if (opts.mode === "regex") {
     const verdict = assessRegexSafety(query);
     if (!verdict.safe) return { error: `unsafe regex refused (ReDoS guard): ${verdict.reason}` };
@@ -939,6 +984,7 @@ export async function searchFile(
   let regexLinesTruncated = 0;
   const longLineRefusals: LongLineRefusal[] = [];
   let resultLimitExceeded = false;
+  const unreadablePaths: string[] = [];
   if (opts.mode === "regex") {
     const executor = new RegexExecutor(query, matcher.flags);
     try {
@@ -951,6 +997,7 @@ export async function searchFile(
         REGEX_OPERATION_TIME_BUDGET_MS,
         { pattern: query, ignoreCase: !sensitive },
       );
+      if (scanned.unreadable) unreadablePaths.push(rel);
       hits = scanned.hits;
       regexTimedOut = scanned.regexTimedOut;
       regexLinesTruncated = scanned.regexLinesTruncated;
@@ -965,6 +1012,7 @@ export async function searchFile(
       mode: opts.mode as "word" | "substring",
       sensitive,
     });
+    if (matchedFile.unreadable) unreadablePaths.push(rel);
     hits = matchedFile.hits;
     excludedByBoundary = matchedFile.excludedByBoundary;
     longLineRefusals.push(...matchedFile.refusals);
@@ -985,5 +1033,6 @@ export async function searchFile(
     prunedToZero: false, // single-file search has no index to prune
     pathFilterExcluded: 0,
     pathFilterMatchedNothing: false,
+    ...(unreadablePaths.length > 0 ? { unreadablePaths } : {}),
   });
 }

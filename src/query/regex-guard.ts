@@ -24,6 +24,9 @@
 /** Bounded-repetition count at/above which a quantifier is refused outright. */
 export const MAX_REPETITION = 1000;
 
+/** Refuse huge user patterns before scanning, compilation, or worker dispatch. */
+export const MAX_REGEX_PATTERN_LENGTH = 10_000;
+
 /** A line longer than this many UTF-16 code units is matched only to this prefix — bounds one
  *  exec's input. (myco already skips whole files over --max-size; this bounds the
  *  rare pathological single line, e.g. a minified blob, within an allowed file.) */
@@ -63,6 +66,9 @@ function parseBraceQuantifier(body: string): { lo: number; hi: number } | null {
  * (`\(`, `\)`, `\+`, …) are literals, not structure.
  */
 export function assessRegexSafety(src: string): RegexVerdict {
+  if (src.length > MAX_REGEX_PATTERN_LENGTH) {
+    return { safe: false, reason: `pattern length ${src.length} exceeds ${MAX_REGEX_PATTERN_LENGTH}` };
+  }
   const groupStack: { expands: boolean }[] = [];
   let inClass = false;
   let classEscaped = false;

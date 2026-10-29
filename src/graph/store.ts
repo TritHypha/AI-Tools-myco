@@ -15,20 +15,26 @@ import * as path from "node:path";
 
 import {
   DEFAULT_INDEX_LIMITS,
+  MAX_INDEX_FILES,
   validateStoredIndex,
 } from "./index-contract.ts";
 import type { StoredFile, StoredIndex } from "./index-contract.ts";
 import { SearchGraph } from "./model.ts";
 import type { TermCounts, UnknownMarker } from "./model.ts";
+import { looksBinary } from "../util/binary.ts";
 
 const FORMAT = 1;
 export const INDEX_DIR = ".myco";
 export const INDEX_FILE = "index.json";
+export const MAX_STORED_INDEX_BYTES = 128 * 1024 * 1024;
+export const MAX_STORED_INDEX_FILES = MAX_INDEX_FILES;
 // Sharded layout (written when the index exceeds one shard's budget): a manifest
 // listing index-NNN.json shards with sha256, byte length and counts. Loading
 // verifies EVERY shard and fails closed (rejected) on any mismatch or absence.
 export const MANIFEST_FILE = "index-manifest.json";
 export const SHARD_FORMAT = 2;
+const MAX_BINARY_MARKERS = 16_384;
+const MAX_BINARY_REVALIDATION_BYTES = 64 * 1024 * 1024;
 export interface ShardBudget { maxEntries: number; maxChars: number; }
 export const DEFAULT_SHARD_BUDGET: Readonly<ShardBudget> = Object.freeze({
   maxEntries: 250_000,
@@ -131,11 +137,11 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-// A structurally invalid payload is the only graph-contract refusal. There is
-// no fixed aggregate file, edge, or serialized-byte budget.
+// Invalid graph payloads and persisted-cache resource caps are separate refusal
+// reasons so callers can explain why a valid in-memory graph was not cached.
 export type SaveOutcome =
   | { written: true }
-  | { written: false; reason: "invalid-payload" };
+  | { written: false; reason: "invalid-payload" | "resource-limit" };
 
 // Write the graph to <root>/.myco/index.json (creating the dir if needed).
 //
@@ -144,6 +150,21 @@ export async function saveGraph(
   graph: SearchGraph,
   budget: Readonly<ShardBudget> = DEFAULT_SHARD_BUDGET,
 ): Promise<SaveOutcome> {
+  await fs.mkdir(root, { recursive: true });
+  const rootStat = await fs.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("MYCO-CACHE-PATH: root must be a physical directory");
+  }
+  const dir = path.join(root, INDEX_DIR);
+  try {
+    const dirStat = await fs.lstat(dir);
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+      throw new Error("MYCO-CACHE-PATH: index directory must be a physical directory");
+    }
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
   const files: StoredFile[] = [];
   for (const rec of graph.files()) {
     const counts = graph.forwardOf(rec.id);
@@ -196,18 +217,28 @@ export async function saveGraph(
     files.push(stored);
   }
   files.sort((left, right) => compareCodeUnits(left.p, right.p));
+  if (files.length > MAX_STORED_INDEX_FILES) return { written: false, reason: "resource-limit" };
   const payload: StoredIndex = { format: FORMAT, createdAt: Date.now(), files };
   const validated = validateStoredIndex(payload, DEFAULT_INDEX_LIMITS);
   if (validated === null) {
     return { written: false, reason: "invalid-payload" };
   }
-  const dir = path.join(root, INDEX_DIR);
   await fs.mkdir(dir, { recursive: true });
+  const physicalRoot = await fs.realpath(root);
+  const physicalDir = await fs.realpath(dir);
+  const physicalRel = path.relative(physicalRoot, physicalDir);
+  if (physicalRel !== INDEX_DIR || path.isAbsolute(physicalRel)) {
+    throw new Error("MYCO-CACHE-PATH: index directory resolves outside the root");
+  }
   const shards = planShards(validated.files, budget);
   const existing = await fs.readdir(dir).catch(() => [] as string[]);
   if (shards.length <= 1) {
     // Fits one shard: keep the legacy single-file layout (format 1).
-    await atomicWrite(dir, INDEX_FILE, JSON.stringify(validated));
+    const text = JSON.stringify(validated);
+    if (Buffer.byteLength(text, "utf8") > MAX_STORED_INDEX_BYTES) {
+      return { written: false, reason: "resource-limit" };
+    }
+    await atomicWrite(dir, INDEX_FILE, text);
     await fs.unlink(path.join(dir, MANIFEST_FILE)).catch(() => undefined);
     for (const name of existing) {
       if (SHARD_NAME.test(name)) await fs.unlink(path.join(dir, name)).catch(() => undefined);
@@ -215,14 +246,19 @@ export async function saveGraph(
     return { written: true };
   }
   const entries: ManifestEntry[] = [];
+  const shardTexts: string[] = [];
+  let shardBytes = 0;
   for (let i = 0; i < shards.length; i += 1) {
     const name = shardName(i);
     const text = JSON.stringify({ format: SHARD_FORMAT, kind: "myco-shard", index: i, files: shards[i] });
-    await atomicWrite(dir, name, text);
+    const bytes = Buffer.byteLength(text, "utf8");
+    shardBytes += bytes;
+    if (shardBytes > MAX_STORED_INDEX_BYTES) return { written: false, reason: "resource-limit" };
+    shardTexts.push(text);
     entries.push({
       name,
       sha256: createHash("sha256").update(text, "utf8").digest("hex"),
-      bytes: Buffer.byteLength(text, "utf8"),
+      bytes,
       pieces: shards[i]!.length,
       terms: shards[i]!.reduce((sum, piece) => sum + piece.t.length, 0),
     });
@@ -235,7 +271,13 @@ export async function saveGraph(
     termEdges: validated.files.reduce((sum, file) => sum + file.t.length, 0),
     shards: entries,
   };
-  await atomicWrite(dir, MANIFEST_FILE, JSON.stringify(manifest));
+  const manifestText = JSON.stringify(manifest);
+  const totalBytes = Buffer.byteLength(manifestText, "utf8") + shardBytes;
+  if (totalBytes > MAX_STORED_INDEX_BYTES) return { written: false, reason: "resource-limit" };
+  for (let i = 0; i < shardTexts.length; i += 1) {
+    await atomicWrite(dir, entries[i]!.name, shardTexts[i]!);
+  }
+  await atomicWrite(dir, MANIFEST_FILE, manifestText);
   await fs.unlink(path.join(dir, INDEX_FILE)).catch(() => undefined);
   const keep = new Set(entries.map((entry) => entry.name));
   for (const name of existing) {
@@ -276,6 +318,18 @@ export async function loadGraphOutcome(
   const data = validateStoredIndex(decoded);
   if (data === null) return { status: "rejected" };
 
+  let binaryMarkers = 0;
+  let binaryBytes = 0;
+  for (const file of data.files) {
+    if (file.k !== "b") continue;
+    if (++binaryMarkers > MAX_BINARY_MARKERS) return { status: "rejected" };
+    const check = await verifyBinaryMarker(root, file);
+    if (!check.valid || binaryBytes + check.bytesRead > MAX_BINARY_REVALIDATION_BYTES) {
+      return { status: "rejected" };
+    }
+    binaryBytes += check.bytesRead;
+  }
+
   const graph = new SearchGraph();
   try {
     for (const f of data.files) {
@@ -315,10 +369,57 @@ export async function loadGraphOutcome(
   };
 }
 
+async function verifyBinaryMarker(
+  root: string,
+  file: StoredFile,
+): Promise<{ valid: boolean; bytesRead: number }> {
+  try {
+    const rootStat = await fs.lstat(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return { valid: false, bytesRead: 0 };
+    let requested = root;
+    const segments = file.p.split("/");
+    for (let i = 0; i < segments.length; i += 1) {
+      requested = path.join(requested, segments[i]!);
+      const stat = await fs.lstat(requested);
+      if (stat.isSymbolicLink() || (i < segments.length - 1 && !stat.isDirectory())) {
+        return { valid: false, bytesRead: 0 };
+      }
+      if (i === segments.length - 1 && (!stat.isFile() || stat.size !== file.s || stat.mtimeMs !== file.m)) {
+        return { valid: false, bytesRead: 0 };
+      }
+    }
+    const handle = await fs.open(requested, "r");
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.size !== file.s || before.mtimeMs !== file.m) {
+        return { valid: false, bytesRead: 0 };
+      }
+      const length = Math.min(8000, before.size);
+      const buffer = Buffer.alloc(length);
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const result = await handle.read(buffer, bytesRead, length - bytesRead, bytesRead);
+        if (result.bytesRead === 0) break;
+        bytesRead += result.bytesRead;
+      }
+      const after = await handle.stat();
+      if (bytesRead !== length || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+        return { valid: false, bytesRead };
+      }
+      return { valid: looksBinary(buffer), bytesRead };
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return { valid: false, bytesRead: 0 };
+  }
+}
+
 // Read a file under <root>/.myco, refusing symlinks and paths escaping the root.
 async function readIndexFile(
   root: string,
   name: string,
+  budget: { usedBytes: number },
 ): Promise<{ status: "ok"; bytes: Buffer } | { status: "absent" | "rejected" }> {
   try {
     const requested = path.join(root, INDEX_DIR, name);
@@ -333,8 +434,32 @@ async function readIndexFile(
       return { status: "rejected" };
     }
     const stat = await fs.lstat(requested);
-    if (!stat.isFile() || stat.isSymbolicLink()) return { status: "rejected" };
-    return { status: "ok", bytes: await fs.readFile(requested) };
+    if (!stat.isFile() || stat.isSymbolicLink() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      return { status: "rejected" };
+    }
+    if (stat.size > MAX_STORED_INDEX_BYTES - budget.usedBytes) return { status: "rejected" };
+    const handle = await fs.open(requested, "r");
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size !== stat.size || opened.mtimeMs !== stat.mtimeMs) {
+        return { status: "rejected" };
+      }
+      const buffer = Buffer.alloc(opened.size + 1);
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const chunk = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+        if (chunk.bytesRead === 0) break;
+        bytesRead += chunk.bytesRead;
+      }
+      const after = await handle.stat();
+      if (bytesRead !== opened.size || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) {
+        return { status: "rejected" };
+      }
+      budget.usedBytes += bytesRead;
+      return { status: "ok", bytes: buffer.subarray(0, bytesRead) };
+    } finally {
+      await handle.close();
+    }
   } catch (error: unknown) {
     // Only a genuinely missing path is absence. Permission failures, invalid
     // paths and I/O faults are rejected evidence, never a reassuring first run.
@@ -352,10 +477,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 async function readStoredIndex(
   root: string,
 ): Promise<{ status: "ok"; value: unknown } | { status: "absent" | "rejected" }> {
-  const manifestRead = await readIndexFile(root, MANIFEST_FILE);
+  const budget = { usedBytes: 0 };
+  const manifestRead = await readIndexFile(root, MANIFEST_FILE, budget);
   if (manifestRead.status === "rejected") return manifestRead;
   if (manifestRead.status !== "ok") {
-    const legacy = await readIndexFile(root, INDEX_FILE);
+    const legacy = await readIndexFile(root, INDEX_FILE, budget);
     if (legacy.status !== "ok") return legacy;
     try {
       return { status: "ok", value: JSON.parse(legacy.bytes.toString("utf8")) as unknown };
@@ -370,10 +496,13 @@ async function readStoredIndex(
     || manifest.format !== 2
     || manifest.kind !== "myco-manifest"
     || typeof manifest.createdAt !== "number"
+    || typeof manifest.fileCount !== "number"
     || !Number.isSafeInteger(manifest.fileCount)
     || !Number.isSafeInteger(manifest.termEdges)
     || !Array.isArray(manifest.shards)
     || manifest.shards.length === 0
+    || manifest.fileCount > MAX_STORED_INDEX_FILES
+    || manifest.shards.length > MAX_STORED_INDEX_FILES
   ) return { status: "rejected" };
   const files: Array<Record<string, unknown>> = [];
   let termEdges = 0;
@@ -388,7 +517,7 @@ async function readStoredIndex(
       || !Number.isSafeInteger(entry.pieces)
       || !Number.isSafeInteger(entry.terms)
     ) return { status: "rejected" };
-    const shardRead = await readIndexFile(root, entry.name);
+    const shardRead = await readIndexFile(root, entry.name, budget);
     // A MISSING shard is never "absent": the manifest says it exists.
     if (shardRead.status !== "ok") return { status: "rejected" };
     const bytes = shardRead.bytes;
@@ -421,6 +550,7 @@ async function readStoredIndex(
         ) return { status: "rejected" };
         for (const term of piece.t as unknown[]) (prev.t as unknown[]).push(term);
       } else {
+        if (files.length >= MAX_STORED_INDEX_FILES) return { status: "rejected" };
         files.push({ ...piece, t: [...(piece.t as unknown[])] });
       }
     }

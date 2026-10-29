@@ -59,14 +59,16 @@ test("termEdgeCount tracks forward edges across add, replace and remove", () => 
   assert.equal(graph.termEdgeCount(), 0);
 });
 
-test("stored-index validation has no fixed aggregate file or term-edge ceiling", () => {
+test("stored-index validation enforces the default file bound and permits an explicit higher cap", () => {
   const files = Array.from({ length: 250_001 }, (_unused, index) => ({
     p: `file-${index}.txt`,
     m: 1,
     s: 0,
     t: [],
   }));
-  const manyFiles = validateStoredIndex({ format: 1, createdAt: 1, files });
+  const payload = { format: 1, createdAt: 1, files };
+  assert.equal(validateStoredIndex(payload), null, "default cache admission refuses more than MAX_INDEX_FILES");
+  const manyFiles = validateStoredIndex(payload, { maxTermsPerFile: Number.MAX_SAFE_INTEGER, maxFiles: 250_001 });
   assert.equal(manyFiles?.files.length, 250_001);
 
   const terms = Array.from({ length: 100_000 }, (_unused, index) => [`term-${index}`, 1] as [string, number]);
