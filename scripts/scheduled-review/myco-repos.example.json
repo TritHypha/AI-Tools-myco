@@ -1,0 +1,8 @@
+{
+  "out": "/mnt/c/Users/YOU/myco-review",
+  "repos": [
+    { "path": "/mnt/c/Users/YOU/Documents/GitHub/project-a" },
+    { "path": "/mnt/c/Users/YOU/Documents/GitHub/project-b", "name": "b", "indexArgs": ["--vendored"] },
+    { "path": "/mnt/c/Users/YOU/Documents/GitHub/project-c", "index": false, "rules": "/mnt/c/Users/YOU/myco-rules.json" }
+  ]
+}

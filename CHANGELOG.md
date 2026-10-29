@@ -14,6 +14,20 @@ that the silence was the defect, not the narrowing.
 
 ### Added
 
+- **Passive review (MYCO-REVIEW-1, 2026-10-29).** `myco check` (alias `review`)
+  reviews the index and `.myco/results` with fixed rules, no AI: indexed vs
+  `git ls-files` with every gap explained, gap growth, unreadable / over-size,
+  shard sha256, secret-guard counts, symlinks, stale or old index, results
+  summaries, counts, result-limit caps, empty results, skipped branches/worktrees,
+  errored or refused targets, well-formed compare output, and regressions against a
+  stable baseline. PASS/WARN/FAIL per check, `review.md` / `review.json` /
+  `baseline.json`, exit 0/1/2, rules from `--rules`, `.myco/review-rules.json` or
+  `myco.config.json`. `myco index` now persists `.myco/index-coverage.json`.
+  `myco run-all --config` indexes and reviews many repos with a combined status and
+  append-only history. `scripts/scheduled-review/` registers a visible Windows task
+  every 3 h (optional toast on FAIL) and has a cron example. Tests: RV-01..RV-20;
+  `scripts/mutate-review.mjs` (11 mutants).
+
 - **Hardening (MYCO-HARD-1, 2026-10-28).** `myco index --at REV` builds the index
   from one commit's tree in git objects (full-SHA pin, fail closed on a bad or
   option-like revision, repository top only, no incremental reuse, `--at` refused

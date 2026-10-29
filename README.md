@@ -297,3 +297,97 @@ See [the scope, limits and snapshot contract](docs/LINK-MONITOR.md).
   summary printed by every run states when it was limited.
 - Very long lines are searched in full with the vendored TriRegex engine; a refusal is
   reported, never treated as no-hit.
+
+## Passive review: `myco check` and `myco run-all` (no AI)
+
+After an index or a search, `myco check` reviews what is on disk with fixed,
+deterministic rules: no AI, no network, the same input always gives the same verdict.
+
+```
+myco index .
+myco check .            # alias: myco review .
+myco check . --json     # machine-readable result on stdout
+```
+
+It reads `.myco/index-manifest.json` (or the legacy `index.json`), the coverage file
+`.myco/index-coverage.json` that `myco index` now writes, and every folder under
+`.myco/results/`. Each check is **PASS**, **WARN** or **FAIL** with a one-line reason
+and, where useful, the paths involved. It writes `.myco/review/review.md`,
+`review.json` and `baseline.json` (no timestamps, so it only changes when the
+verdict does; the next run compares against it). Exit code: **0** all PASS,
+**1** at least one WARN, **2** at least one FAIL.
+
+| Check | Default |
+|---|---|
+| `index.present` – a loadable index exists | FAIL if absent or refused |
+| `index.integrity` – every shard's sha256/bytes match the manifest; orphan shards | FAIL on mismatch/missing, WARN orphan |
+| `index.coverage-file` – coverage file present and valid | WARN |
+| `index.vs-git` – indexed files vs `git ls-files` (or `ls-tree` for `--at`); gaps explained by symlink, submodule, vendored, over-size, unreadable, deleted, tracked-ignored | FAIL if any gap is unexplained |
+| `index.gap-growth` – gap grew since the last review | WARN |
+| `index.unreadable` / `index.skipped` – unreadable and over-size files | WARN when > 0 |
+| `index.secret-guard` – withheld-secret file count (never values); growth; guard OFF | WARN on growth or OFF |
+| `index.symlinks` – new symlinks since the last review | WARN |
+| `index.stale` – index built at a different HEAD | WARN |
+| `index.age` – index older than 24 h | WARN |
+| `results.present` / `results.summaries` – every results folder has `summary.md` + `summary.json`; no orphan target folders | FAIL |
+| `results.counts` – `hits.txt` / `hits.json` / summary counts agree | FAIL |
+| `results.capped` – a target reached the result limit (1000) | WARN |
+| `results.empty` – a search found nothing anywhere | WARN |
+| `results.coverage` – branches/worktrees skipped or limited by a filter | WARN |
+| `results.unreadable` – a target errored (`ERROR.txt`) | FAIL |
+| `results.refused` – a target was refused (budget/policy) | WARN |
+| `compare.wellformed` – compare rows, `result.txt`, `diff.patch` header + hunk, `thread.md`/`thread.json` | FAIL |
+| `review.regression` – a check got worse than in `baseline.json` | WARN |
+
+### Rules
+
+Thresholds use `{"warnAbove": n, "failAbove": n}` (strictly greater than; `null` =
+never); level rules take `"PASS" | "WARN" | "FAIL"`. Sources, first match wins:
+`--rules FILE`, `.myco/review-rules.json`, the `"review"` key of `myco.config.json`,
+built-in defaults. Unknown keys and wrong types are errors, so a typo cannot silently
+switch a rule off.
+
+```json
+{ "unexplainedMissing": { "warnAbove": null, "failAbove": 0 },
+  "gapGrowth": { "warnAbove": 0, "failAbove": 10 },
+  "indexAgeHours": { "warnAbove": 6, "failAbove": null },
+  "staleHead": "FAIL", "emptyResults": "PASS", "resultLimit": 1000, "maxDetails": 20 }
+```
+
+### Many repos: `myco run-all`
+
+```
+myco run-all --config myco-repos.json [--out DIR] [--no-index]
+```
+
+The config lists repos (`path`, optional `name`, `index: false`, `indexArgs`,
+`rules`) and an `out` folder; see `scripts/scheduled-review/myco-repos.example.json`.
+For each repo it runs `myco index` (log in `out/logs/<name>.index.log`) and then the
+review; a missing repo or a failed index is a FAIL. It writes `out/status.json`,
+`out/status.md` and appends one line per run to `out/history.jsonl` (never rewritten).
+Exit code is the worst repo's.
+
+### Scheduling it
+
+Windows (Task Scheduler, through WSL node). The task runs as you with an
+interactive logon, so its PowerShell window is **visible** and stays open with the
+result; nothing runs hidden. `-Toast` pops a notification when the run FAILs
+(BurntToast if installed, otherwise the built-in WinRT toast).
+
+```powershell
+.\scripts\scheduled-review\register-task.ps1 -RepoWsl /mnt/c/path/to/myco -ConfigWsl /mnt/c/path/to/myco-repos.json -Toast
+# remove:  Unregister-ScheduledTask -TaskName 'myco review' -Confirm:$false
+```
+
+If script execution is restricted, run it with
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\scheduled-review\register-task.ps1 ...`.
+Default node is `~/.nvm/versions/node/v24.18.0/bin/node` (change with `-NodeWsl`).
+
+Linux / macOS / WSL cron: see `scripts/scheduled-review/crontab.example`:
+
+```
+0 */3 * * *  cd $HOME/src/myco && node --experimental-strip-types --no-warnings src/cli.ts run-all --config $HOME/myco-repos.json >> $HOME/myco-review/cron.log 2>&1
+```
+
+Review runs when you call `check`, or on the schedule. It is **not** triggered
+automatically after every search.
