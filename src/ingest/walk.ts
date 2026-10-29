@@ -218,13 +218,15 @@ function trackedAncestors(tracked: Set<string>): Set<string> {
 }
 
 // Walk `root` breadth-unspecified, yielding every file that survives the ignore
-// rules and the size cap. Symlinks are not followed (avoids cycles and escapes).
+// rules and the size cap. Symlinks are not followed (avoids cycles and escapes);
+// each one is named in `skippedSymlinks` so the gap is visible (MYCO-HARD-1).
 export async function walk(
   root: string,
   opts: WalkOptions,
   skippedLarge?: string[], // out: paths skipped for exceeding maxFileSize — reported, never silent
   skippedVendored?: string[], // out: vendored dirs (node_modules) pruned by default — reported, never silent
   trackedIgnored?: string[], // out: git-tracked files a .gitignore rule matched, indexed anyway and reported
+  skippedSymlinks?: string[], // out: symlinks (and junctions) never followed - reported, never silent (MYCO-HARD-1)
 ): Promise<FileMeta[]> {
   const rootStat = await fs.lstat(root);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -260,7 +262,12 @@ export async function walk(
 
     for (const ent of entries) {
       const rel = relDir === "" ? ent.name : `${relDir}/${ent.name}`;
-      if (ent.isSymbolicLink()) continue;
+      if (ent.isSymbolicLink()) {
+        // Never followed (cycles, escapes out of the root), but no longer silent:
+        // a link's target content is not in the index, and the report says so.
+        if (!isIgnored(mycoOnly(rules), rel, false)) skippedSymlinks?.push(rel);
+        continue;
+      }
       if (ent.isDirectory()) {
         if (ALWAYS_SKIP.has(ent.name)) continue;
         if (VENDORED_SKIP.has(ent.name) && !opts.includeVendored) {
@@ -279,8 +286,14 @@ export async function walk(
         }
         let st: import("node:fs").Stats;
         try {
-          st = await fs.stat(path.join(absDir, ent.name));
+          // lstat, not stat: if the entry was swapped for a symlink after readdir,
+          // refuse it instead of following the link out of the root.
+          st = await fs.lstat(path.join(absDir, ent.name));
         } catch {
+          continue;
+        }
+        if (st.isSymbolicLink() || !st.isFile()) {
+          skippedSymlinks?.push(rel);
           continue;
         }
         if (st.size > opts.maxFileSize) {

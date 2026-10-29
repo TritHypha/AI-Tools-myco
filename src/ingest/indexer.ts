@@ -17,6 +17,8 @@ import type { SaveOutcome } from "../graph/store.ts";
 import { looksBinary } from "../util/binary.ts";
 import { countTerms } from "./tokenize.ts";
 import { walk } from "./walk.ts";
+import type { FileMeta } from "./walk.ts";
+import { pinnedListing, readPinnedBlob } from "./pinned.ts";
 
 export interface IndexOptions {
   maxFileSize: number;
@@ -26,6 +28,14 @@ export interface IndexOptions {
   hashOversize?: boolean;
   /** Index git-tracked files that .gitignore matches (default true; reported). */
   includeTrackedIgnored?: boolean;
+  /**
+   * Index the tree of this revision (resolved once to a full commit SHA) from the
+   * git object store instead of the working folder (MYCO-HARD-1). Symlinks and
+   * submodules are reported, never followed. Unresolvable revision = throw.
+   */
+  atCommit?: string;
+  /** Withhold secret-looking terms from the stored index (default true; reported). */
+  withholdSecrets?: boolean;
 }
 
 export interface IndexStats {
@@ -41,6 +51,10 @@ export interface IndexStats {
   filesWithOmittedOverlongTerms: number; // files retained with omission metadata
   trackedIgnored: number; // git-tracked files indexed although .gitignore matches them (reported)
   unreadable: number; // listed files whose content read failed this run (reported, never silent)
+  skippedSymlinks: number; // symlinks never followed (reported, never silent)
+  withheldSecretTerms: number; // secret-looking term occurrences kept out of the stored index this run
+  filesWithWithheldSecrets: number; // files (re-)read this run that had any term withheld
+  pinnedCommit?: string; // full SHA when indexed with atCommit
 }
 
 /** "No size cap" — the default since 2026-10-28 (index everything, miss nothing). */
@@ -53,6 +67,7 @@ export const DEFAULT_INDEX_OPTIONS: IndexOptions = {
   useGitignore: true,
   hashOversize: false,
   includeTrackedIgnored: true,
+  withholdSecrets: true,
 };
 
 // Largest text one in-process string can hold (bytes >= UTF-16 units for UTF-8).
@@ -92,6 +107,9 @@ export async function buildIndex(
   omittedOverlongTermPaths: string[];
   unreadablePaths: string[];
   trackedIgnoredPaths: string[];
+  skippedSymlinkPaths: string[];
+  withheldSecretPaths: string[];
+  submodulePaths: string[];
 }> {
   const prior = await loadGraph(root);
   const graph = prior?.graph ?? new SearchGraph();
@@ -109,13 +127,50 @@ export async function buildIndex(
     filesWithOmittedOverlongTerms: 0,
     trackedIgnored: 0,
     unreadable: 0,
+    skippedSymlinks: 0,
+    withheldSecretTerms: 0,
+    filesWithWithheldSecrets: 0,
   };
 
   const skippedLargePaths: string[] = [];
   const skippedVendoredDirs: string[] = [];
   const unreadablePaths: string[] = [];
   const trackedIgnoredPaths: string[] = [];
-  const metas = await walk(root, opts, skippedLargePaths, skippedVendoredDirs, trackedIgnoredPaths);
+  const skippedSymlinkPaths: string[] = [];
+  const withheldSecretPaths: string[] = [];
+  const submodulePaths: string[] = [];
+  const withhold = opts.withholdSecrets !== false;
+
+  // Pinned mode: list the commit's tree from git objects; content comes from blobs.
+  // mtimeMs is 0 for every pinned file, so incremental reuse is OFF in this mode
+  // (size alone cannot prove a blob unchanged); every file is re-read from its blob.
+  const pinned = opts.atCommit !== undefined ? pinnedListing(root, opts.atCommit) : undefined;
+  const blobByPath = new Map<string, string>();
+  let metas: FileMeta[];
+  if (pinned) {
+    stats.pinnedCommit = pinned.commit;
+    skippedSymlinkPaths.push(...pinned.symlinks);
+    submodulePaths.push(...pinned.submodules, ...pinned.other);
+    // Same always-skipped folders as the working-folder walk (.git, .myco at any depth),
+    // so a committed index or nested repo dir is never indexed into itself.
+    const alwaysSkipped = (p: string): boolean => p.split("/").some((seg) => seg === ".git" || seg === ".myco");
+    metas = pinned.entries.filter((e) => !alwaysSkipped(e.relPath)).map((e) => {
+      blobByPath.set(e.relPath, e.blob);
+      const large = e.size > opts.maxFileSize;
+      if (large) skippedLargePaths.push(e.relPath);
+      return {
+        relPath: e.relPath,
+        absPath: "",
+        mtimeMs: 0,
+        size: e.size,
+        ...(large ? { contentSkip: "large" as const } : {}),
+      };
+    });
+  } else {
+    metas = await walk(
+      root, opts, skippedLargePaths, skippedVendoredDirs, trackedIgnoredPaths, skippedSymlinkPaths,
+    );
+  }
   const seen = new Set<string>();
 
   for (const meta of metas) {
@@ -132,6 +187,7 @@ export async function buildIndex(
     // Incremental reuse when size+mtime match AND the content-skip role is stable.
     // Role changes (cap raised/lowered, binary↔text) fall through and re-classify.
     if (
+      !pinned &&
       existing &&
       existing.mtimeMs === meta.mtimeMs &&
       existing.size === meta.size
@@ -160,7 +216,7 @@ export async function buildIndex(
 
     // Over-size: name-index only, never open the file (DESIGN §10).
     if (wantLarge) {
-      const sha256 = opts.hashOversize ? await streamSha256(meta.absPath) : undefined;
+      const sha256 = opts.hashOversize && !pinned ? await streamSha256(meta.absPath) : undefined;
       graph.setFile(
         meta.relPath,
         meta.mtimeMs,
@@ -177,7 +233,9 @@ export async function buildIndex(
 
     let buf: Buffer;
     try {
-      buf = await fs.readFile(meta.absPath);
+      buf = pinned
+        ? readPinnedBlob(root, blobByPath.get(meta.relPath) ?? "")
+        : await fs.readFile(meta.absPath);
     } catch {
       // Races with deletion, permission errors: don't crash, but never silently —
       // the path is reported so a miss cannot read as absence.
@@ -193,14 +251,24 @@ export async function buildIndex(
       continue;
     }
 
-    const tokenizeReport = { omittedOverlongTerms: 0 };
+    const tokenizeReport = withhold
+      ? { omittedOverlongTerms: 0, withheldSecretTerms: 0 }
+      : { omittedOverlongTerms: 0 };
+    const counts = countTerms(buf.toString("utf8"), tokenizeReport);
+    const withheld = tokenizeReport.withheldSecretTerms ?? 0;
+    if (withheld > 0) {
+      stats.withheldSecretTerms += withheld;
+      withheldSecretPaths.push(meta.relPath);
+    }
+    // A withheld term is counted with the omitted ones, so search re-reads this
+    // file directly: the token stays findable, it is just never stored in .myco.
     graph.setFile(
       meta.relPath,
       meta.mtimeMs,
       meta.size,
-      countTerms(buf.toString("utf8"), tokenizeReport),
+      counts,
       undefined,
-      tokenizeReport.omittedOverlongTerms,
+      tokenizeReport.omittedOverlongTerms + withheld,
     );
     if (existing) stats.updated++;
     else stats.added++;
@@ -219,6 +287,8 @@ export async function buildIndex(
   stats.skippedVendored = skippedVendoredDirs.length;
   stats.trackedIgnored = trackedIgnoredPaths.length;
   stats.unreadable = unreadablePaths.length;
+  stats.skippedSymlinks = skippedSymlinkPaths.length;
+  stats.filesWithWithheldSecrets = withheldSecretPaths.length;
   stats.files = graph.fileCount();
   const omittedOverlongTermPaths = [...graph.files()]
     .filter((file) => (file.omittedOverlongTerms ?? 0) > 0)
@@ -240,5 +310,8 @@ export async function buildIndex(
     omittedOverlongTermPaths,
     unreadablePaths,
     trackedIgnoredPaths,
+    skippedSymlinkPaths,
+    withheldSecretPaths: withheldSecretPaths.sort(),
+    submodulePaths,
   };
 }

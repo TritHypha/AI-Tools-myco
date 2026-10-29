@@ -8,9 +8,18 @@
 import type { TermCounts } from "../graph/model.ts";
 import { MAX_INDEX_TERM_LENGTH } from "../graph/index-contract.ts";
 import { foldCase, wordScanner } from "../util/normalize.ts";
+import { classifySecretTerm } from "./secret-guard.ts";
 
 export interface TokenizeReport {
   omittedOverlongTerms: number;
+  /**
+   * Secret-looking terms WITHHELD from the term graph (MYCO-HARD-1). Optional so
+   * older callers keep compiling; when present, withholding is on. Counts only,
+   * never the token itself.
+   */
+  withheldSecretTerms?: number;
+  knownPrefix?: number;
+  highEntropy?: number;
 }
 
 // Count every word-term in `text`. Case-folded so the index is case-insensitive
@@ -25,6 +34,15 @@ export function countTerms(text: string, report?: TokenizeReport): TermCounts {
     if (term.length > MAX_INDEX_TERM_LENGTH) {
       if (report) report.omittedOverlongTerms += 1;
       continue;
+    }
+    if (report && report.withheldSecretTerms !== undefined) {
+      const reason = classifySecretTerm(term);
+      if (reason !== null) {
+        report.withheldSecretTerms += 1;
+        if (reason === "KNOWN_PREFIX") report.knownPrefix = (report.knownPrefix ?? 0) + 1;
+        else report.highEntropy = (report.highEntropy ?? 0) + 1;
+        continue; // never stored; the file is flagged for direct verification instead
+      }
     }
     counts.set(term, (counts.get(term) ?? 0) + 1);
   }
