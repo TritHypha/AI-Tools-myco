@@ -7,6 +7,7 @@
 
 import type { Match, SearchResult } from "./query/search.ts";
 import { MAX_REGEX_LINE_LEN } from "./query/regex-guard.ts";
+import { terminalData, terminalJson } from "./util/terminal.ts";
 
 export interface RenderOptions {
   color: boolean;
@@ -58,18 +59,18 @@ function group(matches: Match[]): LineGroup[] {
 }
 
 function highlight(text: string, spans: Array<{ col: number; length: number }>, color: boolean): string {
-  if (!color) return text;
+  if (!color) return terminalData(text);
   const sorted = spans.slice().sort((a, b) => a.col - b.col);
   let out = "";
   let cursor = 0;
   for (const s of sorted) {
     const start = s.col - 1;
     if (start < cursor) continue; // overlapping hit already covered
-    out += text.slice(cursor, start);
-    out += paint(true, C.hit, text.slice(start, start + s.length));
+    out += terminalData(text.slice(cursor, start));
+    out += paint(true, C.hit, terminalData(text.slice(start, start + s.length)));
     cursor = start + s.length;
   }
-  out += text.slice(cursor);
+  out += terminalData(text.slice(cursor));
   return out;
 }
 
@@ -82,7 +83,7 @@ function renderContent(result: SearchResult, color: boolean): string {
     lastPath = g.path;
 
     const loc =
-      paint(color, C.path, g.path) +
+      paint(color, C.path, terminalData(g.path)) +
       ":" +
       paint(color, C.line, String(g.line)) +
       ":" +
@@ -90,11 +91,11 @@ function renderContent(result: SearchResult, color: boolean): string {
 
     for (let k = 0; k < g.before.length; k++) {
       const ln = g.line - g.before.length + k;
-      out.push(paint(color, C.dim, `${g.path}-${ln}- ${g.before[k]}`));
+      out.push(paint(color, C.dim, `${terminalData(g.path)}-${ln}- ${terminalData(g.before[k]!)}`));
     }
     out.push(`${loc}: ${highlight(g.text, g.spans, color)}`);
     for (let k = 0; k < g.after.length; k++) {
-      out.push(paint(color, C.dim, `${g.path}-${g.line + k + 1}- ${g.after[k]}`));
+      out.push(paint(color, C.dim, `${terminalData(g.path)}-${g.line + k + 1}- ${terminalData(g.after[k]!)}`));
     }
   }
   return out.join("\n");
@@ -112,7 +113,7 @@ export function render(
   opts: RenderOptions,
 ): string {
   if (opts.json) {
-    return JSON.stringify(
+    return terminalJson(
       {
         matches: result.matches.map((m) => ({
           path: m.path,
@@ -123,6 +124,7 @@ export function render(
         })),
         unknown: result.unknown,
         complete: result.complete,
+        skippedCoverage: result.skippedCoverage ?? { largePaths: [], vendoredDirs: [] },
         summary: {
           filesSearched: result.filesSearched,
           filesMatched: result.filesMatched,
@@ -137,10 +139,9 @@ export function render(
           prunedToZero: result.prunedToZero,
           pathFilterExcluded: result.pathFilterExcluded,
           pathFilterMatchedNothing: result.pathFilterMatchedNothing,
+          unreadablePaths: result.unreadablePaths ?? [],
         },
       },
-      null,
-      2,
     );
   }
   const body = filesMode
@@ -206,7 +207,7 @@ export function summaryLine(result: SearchResult): string {
   }
   if (result.unknown.length > 0) {
     const n = result.unknown.length;
-    const paths = result.unknown.map((u) => u.path).join(", ");
+    const paths = result.unknown.map((u) => terminalData(u.path)).join(", ");
     const recorded = result.unknown.find((u) => u.thresholdBytes !== "NOT_RECORDED");
     const th = recorded && typeof recorded.thresholdBytes === "number"
       ? ` > ${(recorded.thresholdBytes / (1024 * 1024)).toFixed(0)} MiB`
@@ -214,6 +215,10 @@ export function summaryLine(result: SearchResult): string {
     bits.push(
       `[incomplete — ${n} file(s) INDEXED_UNKNOWN (OVERSIZE${th}): ${paths}]`,
     );
+  }
+  if (result.unreadablePaths && result.unreadablePaths.length > 0) {
+    const paths = result.unreadablePaths.map(terminalData).join(", ");
+    bits.push(`[incomplete — ${result.unreadablePaths.length} unreadable file(s): ${paths}]`);
   }
   return bits.join(" · ");
 }

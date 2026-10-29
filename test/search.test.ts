@@ -240,6 +240,76 @@ test("overlapping-alternation regex cannot block the main process", async () => 
   }
 });
 
+test("an explicit symlink file is refused instead of reading its outside target", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-search-file-link-"));
+  const outside = path.join(dir, "outside.txt");
+  const alias = path.join(dir, "alias.txt");
+  await fs.writeFile(outside, "needle outside selected file\n");
+  try {
+    try {
+      await fs.symlink(outside, alias, "file");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        t.skip("host cannot create a file link for the containment test");
+        return;
+      }
+      throw error;
+    }
+    const outcome = await searchFile(alias, "needle", {
+      mode: "substring", caseSensitive: true, files: false, limit: 10, context: 0,
+    });
+    assert.ok(isError(outcome), "an explicit file link must not be followed");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a configured direct-file size cap returns explicit unknown coverage without a content hit", async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-search-file-cap-"));
+  const file = path.join(dir, "large.txt");
+  await fs.writeFile(file, "needle beyond the configured cap\n");
+  try {
+    const outcome = await searchFile(file, "needle", {
+      mode: "substring", caseSensitive: true, files: false, limit: 10, context: 0,
+      maxFileSize: 4,
+    } as SearchOptions & { maxFileSize: number });
+    assert.ok(!isError(outcome), "a size skip is an incomplete result, not a command failure");
+    if (isError(outcome)) return;
+    assert.equal(outcome.matches.length, 0);
+    assert.equal(outcome.complete, false);
+    assert.deepEqual(outcome.unknown, [{
+      path: "large.txt", size: 33, type: "UNKNOWN", state: "INDEXED_UNKNOWN",
+      reason: "OVERSIZE", thresholdBytes: 4,
+    }]);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a candidate read failure is named and makes search coverage incomplete", async (t) => {
+  const dir = await fixtureTree();
+  const target = path.join(dir, "a.txt");
+  const { graph } = await buildIndex(dir, { maxFileSize: 1 << 20, useGitignore: false });
+  const readFile = fs.readFile.bind(fs);
+  try {
+    t.mock.method(fs, "readFile", async (...args: Parameters<typeof fs.readFile>) => {
+      if (String(args[0]) === target) throw Object.assign(new Error("fixture denied"), { code: "EACCES" });
+      return readFile(...args);
+    });
+    const outcome = await search(dir, graph, "cat", {
+      mode: "word", caseSensitive: "smart", files: false, limit: 100, context: 0,
+    });
+    assert.ok(!isError(outcome));
+    if (isError(outcome)) return;
+    assert.equal(outcome.complete, false);
+    assert.deepEqual(outcome.unreadablePaths, ["a.txt"]);
+    assert.match(summaryLine(outcome), /unreadable.*a\.txt/i);
+  } finally {
+    t.mock.restoreAll();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("regex line-length coverage cap is explicit, never a silent absence", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "myco-regex-cap-"));
   const file = path.join(dir, "long.txt");

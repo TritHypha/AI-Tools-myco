@@ -94,7 +94,8 @@ Reaching a limit still reports incomplete coverage, never a verified absence.
   noted on the search path. A coverage cap is never a silent one.
 - **Zero runtime dependencies.** Pure Node built-ins.
 - **Pre-emptible regex execution** — known exponential shapes are refused before
-  compilation, and every remaining JavaScript regex operation runs in a worker
+  compilation, patterns over 10,000 UTF-16 code units are refused, and every
+  remaining JavaScript regex operation runs in a worker
   with a hard deadline. If it stalls, the worker is terminated and the result is
   explicitly marked incomplete. Over-size line prefixes and search/result limits
   are also reported; a narrowed regex result never presents itself as absence.
@@ -148,12 +149,15 @@ statistics, not document counts, verified facts, or a measure of corpus coverage
 | `--no-color` | disable ANSI colour |
 | `--no-refresh` | search the existing index without refreshing |
 | `--no-gitignore` | do not honour `.gitignore` |
-| `--max-size N` | skip files larger than N MB (default 5) |
+| `--max-size N` | skip files larger than N MB (default: no size cap) |
 
 Exit codes: `0` matches found · `1` no matches · `2` error or incomplete
 coverage. Regex timeout, whole-search timeout, and regex line-cap truncation
-are incomplete and therefore fail closed with `2`; JSON still carries the
-partial evidence and exact reason.
+are incomplete and therefore fail closed with `2`; JSON carries partial results,
+skipped paths, unreadable paths, and the completeness state. Human-readable output
+escapes terminal control characters found in source paths and lines. JSON also
+escapes C1 terminal controls as Unicode escapes, which parse back to the original
+characters without issuing terminal commands.
 
 ## Git worktree-aware search
 

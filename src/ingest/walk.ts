@@ -56,7 +56,7 @@ export interface WalkOptions {
 }
 
 interface Rule {
-  re: RegExp;
+  glob: string;
   dirOnly: boolean;
   negate: boolean;
   basename: boolean; // no-slash rule -> test the basename, else the full path
@@ -72,14 +72,33 @@ const ALWAYS_SKIP = new Set([".git", ".myco"]);
 // silent), a vendored skip is a coverage cap the user must be able to see and lift.
 const VENDORED_SKIP = new Set(["node_modules"]);
 
-function globToRegExp(glob: string): RegExp {
-  let re = "";
-  for (const ch of glob) {
-    if (ch === "*") re += "[^/]*";
-    else if (ch === "?") re += "[^/]";
-    else re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+const MAX_IGNORE_PATTERN_LENGTH = 4096;
+const MAX_GLOB_OPERATIONS_PER_PATH = 5_000;
+
+function globMatches(glob: string, target: string, budget: { remaining: number }): boolean {
+  let patternIndex = 0;
+  let targetIndex = 0;
+  let lastStar = -1;
+  let retryTarget = -1;
+  while (targetIndex < target.length) {
+    if (--budget.remaining < 0) throw new Error("MYCO-GLOB-BUDGET: ignore glob matching exceeded its fixed work budget");
+    const token = glob[patternIndex];
+    const char = target[targetIndex];
+    if (token === "?" && char !== "/" || token !== undefined && token !== "*" && token === char) {
+      patternIndex++;
+      targetIndex++;
+    } else if (token === "*") {
+      lastStar = patternIndex++;
+      retryTarget = targetIndex;
+    } else if (lastStar >= 0 && target[retryTarget + 1] !== "/") {
+      patternIndex = lastStar + 1;
+      targetIndex = ++retryTarget;
+    } else {
+      return false;
+    }
   }
-  return new RegExp(`^${re}$`);
+  while (glob[patternIndex] === "*") patternIndex++;
+  return patternIndex === glob.length;
 }
 
 function parseIgnore(text: string, base: string, source: "myco" | "git" = "git"): Rule[] {
@@ -102,7 +121,10 @@ function parseIgnore(text: string, base: string, source: "myco" | "git" = "git")
     if (body.startsWith("**/")) body = body.slice(3);
     if (body === "") continue;
     const basename = !anchored && !body.includes("/");
-    rules.push({ re: globToRegExp(body), dirOnly, negate, basename, base, source });
+    if (body.length > MAX_IGNORE_PATTERN_LENGTH) {
+      throw new Error(`MYCO-IGNORE-PATTERN-LIMIT: ignore pattern exceeds ${MAX_IGNORE_PATTERN_LENGTH} characters`);
+    }
+    rules.push({ glob: body, dirOnly, negate, basename, base, source });
   }
   return rules;
 }
@@ -143,6 +165,7 @@ async function loadDirRules(
 // within its own subtree, and is tested against the path RELATIVE to that base.
 function isIgnored(rules: Rule[], relPath: string, isDir: boolean): boolean {
   let ignored = false;
+  const budget = { remaining: MAX_GLOB_OPERATIONS_PER_PATH };
   for (const r of rules) {
     if (r.dirOnly && !isDir) continue;
     let sub = relPath;
@@ -151,7 +174,7 @@ function isIgnored(rules: Rule[], relPath: string, isDir: boolean): boolean {
       sub = relPath.slice(r.base.length + 1);
     }
     const target = r.basename ? sub.slice(sub.lastIndexOf("/") + 1) : sub;
-    if (r.re.test(target)) ignored = !r.negate;
+    if (globMatches(r.glob, target, budget)) ignored = !r.negate;
   }
   return ignored;
 }
@@ -203,6 +226,10 @@ export async function walk(
   skippedVendored?: string[], // out: vendored dirs (node_modules) pruned by default — reported, never silent
   trackedIgnored?: string[], // out: git-tracked files a .gitignore rule matched, indexed anyway and reported
 ): Promise<FileMeta[]> {
+  const rootStat = await fs.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("MYCO-SYMLINK_ROOT: search root must be a physical directory");
+  }
   const out: FileMeta[] = [];
   const keepTracked = opts.useGitignore && opts.includeTrackedIgnored !== false;
   const tracked = keepTracked ? gitTrackedPaths(root) : undefined;

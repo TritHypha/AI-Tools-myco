@@ -22,6 +22,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
 import type { MatchMode } from "./search.ts";
+import { terminalData } from "../util/terminal.ts";
 
 export interface GitResult { code: number; stdout: string; stderr: string; }
 
@@ -284,11 +285,11 @@ export interface Coverage {
 
 export function renderCoverage(c: Coverage): string {
   const lines: string[] = [];
-  lines.push(`coverage (${c.command})${c.repo ? ` — repo ${c.repo}` : " — not a git repo"}`);
+  lines.push(`coverage (${c.command})${c.repo ? ` — repo ${terminalData(c.repo)}` : " — not a git repo"}`);
   if (c.limited) {
     const bits = [
-      ...(c.limited.branches ?? []).map((b) => `--branch ${b}`),
-      ...(c.limited.worktrees ?? []).map((w) => `--worktree ${w}`),
+      ...(c.limited.branches ?? []).map((b) => `--branch ${terminalData(b)}`),
+      ...(c.limited.worktrees ?? []).map((w) => `--worktree ${terminalData(w)}`),
     ];
     lines.push(`  LIMITED run (${bits.join(", ")}): other branches/worktrees were NOT covered`);
   }
@@ -298,14 +299,14 @@ export function renderCoverage(c: Coverage): string {
   }
   if (c.index) lines.push(`  index: ${c.index.files} file(s), ${c.index.layout} store, ${c.index.shards} shard(s)`);
   for (const t of c.targets) {
-    lines.push(`  ${t.token}: ${t.files ?? "?"} file(s), ${t.status}${t.note ? ` — ${t.note}` : ""}`);
+    lines.push(`  ${terminalData(t.token)}: ${t.files ?? "?"} file(s), ${terminalData(t.status)}${t.note ? ` — ${terminalData(t.note)}` : ""}`);
   }
   lines.push(`  skipped: ${c.skipped.length === 0 ? "none" : ""}`);
-  for (const s of c.skipped) lines.push(`    ${s}`);
+  for (const s of c.skipped) lines.push(`    ${terminalData(s)}`);
   lines.push(`  unreadable: ${c.unreadable.length === 0 ? "none" : ""}`);
-  for (const s of c.unreadable) lines.push(`    ${s}`);
+  for (const s of c.unreadable) lines.push(`    ${terminalData(s)}`);
   lines.push(`  refused: ${c.refused.length === 0 ? "none" : ""}`);
-  for (const s of c.refused) lines.push(`    ${s}`);
+  for (const s of c.refused) lines.push(`    ${terminalData(s)}`);
   return lines.join("\n").replace(/: \n/g, ":\n");
 }
 

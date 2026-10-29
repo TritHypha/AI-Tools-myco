@@ -202,3 +202,41 @@ test("walk skips node_modules by default, REPORTS the skip, and --vendored inclu
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("walk refuses a symlinked root instead of enumerating outside files", async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "myco-walk-root-link-"));
+  const outside = path.join(parent, "outside");
+  const alias = path.join(parent, "alias");
+  try {
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "secret.txt"), "outside-only");
+    try {
+      await fs.symlink(outside, alias, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        t.skip("host cannot create a directory link for the containment test");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      walk(alias, { maxFileSize: 1024, useGitignore: false }),
+      /SYMLINK_ROOT/,
+    );
+  } finally {
+    await fs.rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("walk refuses an ignore glob whose matching work exceeds its fixed budget", async () => {
+  const rules = Array.from({ length: 6000 }, (_, i) => `never-match-${i}`).join("\n");
+  const dir = await tmpTree({ ".gitignore": `${rules}\n`, "file.txt": "x" });
+  try {
+    await assert.rejects(
+      walk(dir, { maxFileSize: 1024, useGitignore: true }),
+      /MYCO-GLOB-BUDGET/,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

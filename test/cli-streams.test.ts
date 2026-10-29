@@ -22,6 +22,8 @@ import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { renderCoverage } from "../src/query/branches.ts";
+import { terminalJson } from "../src/util/terminal.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CLI = path.join(here, "..", "src", "cli.ts");
@@ -63,6 +65,22 @@ test("defect 2: a FILE path arg searches that file (no ENOTDIR)", async () => {
     assert.equal(r.code, 0, `expected exit 0 for a file path, got ${r.code} (2 = the old ENOTDIR crash); err=${r.err}`);
     assert.match(r.out, /a\.b/, "should return the a.b match");
     assert.doesNotMatch(r.out, /axb/, "substring '.' must be literal — must NOT match axb");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("direct-file --max-size refuses over-cap content as incomplete JSON", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "myco-cli-direct-cap-"));
+  const file = path.join(dir, "large.txt");
+  writeFileSync(file, "x".repeat(1024 * 1024 + 1) + "needle");
+  try {
+    const r = await runCli(["-s", "needle", file, "--max-size", "1", "--json"]);
+    assert.equal(r.code, 2, "unknown over-cap content must not be reported as a clean miss");
+    assert.equal(r.err, "");
+    const body = JSON.parse(r.out);
+    assert.equal(body.complete, false);
+    assert.equal(body.unknown[0]?.path, "large.txt");
+    assert.equal(body.unknown[0]?.thresholdBytes, 1024 * 1024);
+    assert.deepEqual(body.matches, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -115,6 +133,71 @@ test("an incomplete regex result exits 2 even though diagnostic evidence is retu
     assert.equal(r.code, 2, `incomplete coverage must fail closed, got ${r.code}`);
     assert.match(r.out, /exceeded its deadline and was terminated/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("JSON search preserves skipped and unreadable coverage, and terminal output escapes control data", async () => {
+  const dir = fixture();
+  const overCap = path.join(dir, "oversize.txt");
+  const control = path.join(dir, "control.txt");
+  writeFileSync(overCap, "needle".repeat(200));
+  writeFileSync(control, `needle\u001b[31mRED\u001b[0m\u0007\u009b[31m\n`);
+  try {
+    const json = await runCli(["-s", "needle", dir, "--json", "--max-size", "0.0001", "--no-gitignore"]);
+    assert.equal(json.code, 2, "omitted over-size coverage must not return a complete success");
+    const payload = JSON.parse(json.out) as { complete: boolean; skippedCoverage?: { largePaths: string[] }; unreadablePaths?: string[] };
+    assert.equal(payload.complete, false);
+    assert.ok(payload.skippedCoverage?.largePaths.includes("oversize.txt"), "machine output names the skipped path");
+
+    const human = await runCli(["-s", "needle", control, "--no-color"]);
+    assert.equal(human.code, 0);
+    assert.doesNotMatch(human.out, /\u001b\[/, "terminal escape sequences from source text are rendered as data");
+    assert.match(human.out, /\\x1b\[31mRED\\x1b\[0m\\x07/);
+
+    const jsonText = await runCli(["-s", "needle", control, "--json"]);
+    assert.equal(jsonText.code, 0);
+    assert.doesNotMatch(jsonText.out, /\u009b/, "JSON remains safe when displayed in an 8-bit-control terminal");
+    assert.equal(JSON.parse(jsonText.out).matches[0].text, `needle\u001b[31mRED\u001b[0m\u0007\u009b[31m`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("index coverage escapes controls in skipped filenames", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows filenames cannot contain terminal control characters");
+    return;
+  }
+  const dir = fixture();
+  const hostileName = "\u001b]0;owned\u0007.txt";
+  writeFileSync(path.join(dir, hostileName), "x".repeat(200));
+  try {
+    const result = await runCli(["index", dir, "--max-size", "0.0001", "--no-color"]);
+    assert.equal(result.code, 0);
+    assert.doesNotMatch(result.out, /\u001b|\u0007/, "terminal controls must not reach stdout");
+    assert.match(result.out, /\\x1b\]0;owned\\x07\.txt/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("branch coverage escapes controls in skipped and unreadable path details", () => {
+  const hostile = "\u001b]0;owned\u0007.txt";
+  const rendered = renderCoverage({
+    command: "search",
+    repo: "myco",
+    limited: null,
+    branches: { searched: 0, total: 0 },
+    worktrees: { searched: 0, total: 0 },
+    targets: [],
+    skipped: [`oversize: ${hostile}`],
+    unreadable: [hostile],
+    refused: [],
+  });
+  assert.doesNotMatch(rendered, /\u001b|\u0007/);
+  assert.match(rendered, /\\x1b\]0;owned\\x07\.txt/);
+});
+
+test("JSON serialization escapes terminal C1 controls and round-trips the same data", () => {
+  const value = { path: `name\u009b[31m`, text: "\u007f" };
+  const encoded = terminalJson(value);
+  assert.doesNotMatch(encoded, /\u009b|\u007f/);
+  assert.deepEqual(JSON.parse(encoded), value);
 });
 
 test("index and status disclose overlong-term omissions without exposing term bodies", async () => {

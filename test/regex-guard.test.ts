@@ -8,6 +8,7 @@ import {
   MAX_REGEX_LINE_LEN,
   REGEX_OPERATION_TIME_BUDGET_MS,
   SEARCH_TIME_BUDGET_MS,
+  MAX_REGEX_PATTERN_LENGTH,
 } from "../src/query/regex-guard.ts";
 
 test("refuses the canonical exponential shapes (nested expanding quantifiers)", () => {
@@ -53,4 +54,10 @@ test("constants are sane bounds", () => {
   assert.ok(REGEX_OPERATION_TIME_BUDGET_MS >= 50);
   assert.ok(REGEX_OPERATION_TIME_BUDGET_MS < SEARCH_TIME_BUDGET_MS);
   assert.ok(SEARCH_TIME_BUDGET_MS >= 1_000);
+});
+
+test("refuses patterns above the admission bound before parsing or compilation", () => {
+  const verdict = assessRegexSafety("a".repeat(MAX_REGEX_PATTERN_LENGTH + 1));
+  assert.equal(verdict.safe, false);
+  if (!verdict.safe) assert.match(verdict.reason, /pattern length/);
 });

@@ -102,7 +102,8 @@ Two phases:
 2. **Verify** — read only the candidate files and confirm real matches. Word and
    substring modes use the local precise matcher. Raw regex operations execute in
    a killable worker with a per-operation deadline, plus whole-search and input
-   bounds; every reached bound is represented in `SearchResult`.
+   bounds; patterns over 10,000 UTF-16 code units are refused before parsing or
+   compilation, and every reached bound is represented in `SearchResult`.
 
 Because phase 1 uses the graph, a selective query reads a handful of files where
 grep reads the whole tree. The AND-intersection means a two-word query is *more*
@@ -137,10 +138,13 @@ A *practical subset* of `.gitignore`, chosen to be predictable:
 - trailing `/` ⇒ directory-only
 - leading `!` ⇒ negate; last match wins
 - `*` and `?` are globs; **`**` and advanced forms are not supported**
+- matching uses a fixed operation budget; an overlong pattern or exhausted budget
+  fails the walk with an explicit error rather than silently changing coverage
 
 `.git` and `.myco` are always skipped. `.mycoignore` and (by default)
-`.gitignore` are read from the root. This is not bug-for-bug gitignore
-compatibility, and that is deliberate.
+`.gitignore` files are read at every visited directory and their rules apply only
+below that directory. This is not bug-for-bug gitignore compatibility, and that is
+deliberate.
 
 ## 8. Safety posture
 
@@ -164,6 +168,11 @@ myco reads files and writes only `./.myco/`. Notable choices:
   graph identity.
 - **Symlinks are not followed** during the walk — avoids cycles and escaping the
   root.
+- **Terminal output treats source controls as data.** C0/C1 control characters in
+  paths and matched lines are escaped before human-readable output. JSON preserves
+  skipped and unreadable coverage explicitly; C1 controls are JSON-escaped so a
+  terminal does not execute them and parsing retains the original text. Incomplete
+  coverage exits with 2.
 - **No code execution, no network.** Pure Node built-ins; nothing is `eval`'d.
 - **Binary + size caps** bound memory and avoid junk terms — and the size cap is
   **visible, never silent**: over-size skips are counted in the index stats,

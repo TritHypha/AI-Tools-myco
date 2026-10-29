@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
+import { terminalData } from './util/terminal.ts';
 
 export const LINK_SCHEMA = 'myco.links.v1';
 export const DEFAULT_LIMITS = {
@@ -66,6 +67,7 @@ export function destinations(line: string): { targets: string[]; malformed: bool
 }
 
 export async function scanLinks(root: string, limits: Limits = DEFAULT_LIMITS): Promise<Scan> {
+  root = path.resolve(root);
   const start = Date.now();
   const result: Scan = { startedAt: new Date(start).toISOString(), completedAt: '',
     findings: [], issues: [], files: 0, references: 0, directories: [] };
@@ -97,12 +99,24 @@ export async function scanLinks(root: string, limits: Limits = DEFAULT_LIMITS): 
     if (!target || /[\r\n\0]/.test(target)) { report('UNPARSEABLE'); return; }
     if (target.split(/[\\/]/).some(p => excluded.has(p))) { report('EXCLUDED'); return; }
     const resolved = path.resolve(path.dirname(path.join(root, source)), target);
-    try {
-      await fs.stat(resolved);
-      if (temp) report('TEMP_REFERENCE');
-    } catch (e) {
-      report(['ENOENT', 'ENOTDIR'].includes(errorCode(e)) ? 'BROKEN' : 'UNAVAILABLE');
+    const relative = path.relative(root, resolved);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      report('EXCLUDED');
+      return;
     }
+    let current = root;
+    const parts = relative === '' ? [] : relative.split(path.sep);
+    for (const part of parts.length ? parts : ['.']) {
+      current = path.join(current, part);
+      try {
+        const stat = await fs.lstat(current);
+        if (stat.isSymbolicLink()) { report('EXCLUDED'); return; }
+      } catch (e) {
+        report(['ENOENT', 'ENOTDIR'].includes(errorCode(e)) ? 'BROKEN' : 'UNAVAILABLE');
+        return;
+      }
+    }
+    if (temp) report('TEMP_REFERENCE');
   }
   async function visit(dir: string) {
     if (!budget()) return;
@@ -156,7 +170,8 @@ export async function scanLinks(root: string, limits: Limits = DEFAULT_LIMITS): 
     } catch (e) { issue(`DIRECTORY_READ:${path.relative(root, dir)}:${errorCode(e)}`); }
   }
   try {
-    if ((await fs.lstat(root)).isSymbolicLink()) issue('SYMLINK_ROOT');
+    const rootStat = await fs.lstat(root);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) issue('SYMLINK_ROOT');
     else await visit(root);
   } catch (e) { issue(`ROOT_UNAVAILABLE:${errorCode(e)}`); }
   budget();
@@ -313,12 +328,12 @@ export async function linksCommand(argv: string[]): Promise<number> {
   process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt);
   try {
     monitor = await startLinkMonitor(positionals[1]!, values.snapshot, overrides);
-    console.log(`Myco link monitor publishing to ${path.resolve(values.snapshot)}; Ctrl+C to stop.`);
+    console.log(`Myco link monitor publishing to ${terminalData(path.resolve(values.snapshot))}; Ctrl+C to stop.`);
     return await new Promise<number>(resolve => {
-      const poll = setInterval(() => { if (monitor!.error) { console.error(String(monitor!.error)); finish!(2); } }, 200);
+      const poll = setInterval(() => { if (monitor!.error) { console.error(terminalData(String(monitor!.error))); finish!(2); } }, 200);
       finish = (code = 0) => {
         clearInterval(poll);
-        void monitor!.stop().then(() => resolve(code), e => { console.error(String(e)); resolve(2); });
+        void monitor!.stop().then(() => resolve(code), e => { console.error(terminalData(String(e))); resolve(2); });
       };
       if (stopRequested) finish();
     });
