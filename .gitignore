@@ -18,3 +18,8 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# myco is self-contained: never let a broad 'vendor/' rule (here, in a global
+# excludesFile, or in a project that vendors myco) drop the TriRegex engine.
+!src/vendor/
+!src/vendor/triregex/**
