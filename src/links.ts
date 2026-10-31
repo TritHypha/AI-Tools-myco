@@ -84,7 +84,12 @@ export async function scanLinks(root: string, limits: Limits = DEFAULT_LIMITS): 
   async function check(source: string, line: number, raw: string) {
     if (++result.references > limits.maxReferences) { issue('REFERENCE_LIMIT'); halted = true; return; }
     let target = raw;
-    const temp = /(?:^|[\\/])(?:temp|tmp)(?:[\\/]|$)/i.test(raw);
+    const TEMP_SEGMENT = /(?:^|[\\/])(?:temp|tmp)(?:[\\/]|$)/i;
+    // Judged on the reference as written; once it resolves inside the scanned
+    // root it is judged on its root-relative part only, so a repo that itself
+    // lives under /tmp or %TEMP% does not turn every absolute or file: URL
+    // reference into a false TEMP_REFERENCE.
+    let temp = TEMP_SEGMENT.test(raw);
     const report = (kind: Finding['kind']) => finding({ source, line, target: raw, kind, temp });
     if (raw.length > 4096 || raw.includes('\0')) { report('UNPARSEABLE'); return; }
     if (/^(?:https?:|mailto:|data:)/i.test(raw) || raw.startsWith('#')) return;
@@ -104,6 +109,7 @@ export async function scanLinks(root: string, limits: Limits = DEFAULT_LIMITS): 
       report('EXCLUDED');
       return;
     }
+    temp = TEMP_SEGMENT.test(relative);
     let current = root;
     const parts = relative === '' ? [] : relative.split(path.sep);
     for (const part of parts.length ? parts : ['.']) {

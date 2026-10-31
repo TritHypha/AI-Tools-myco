@@ -21,7 +21,8 @@ import { INDEX_DIR, INDEX_FILE, MANIFEST_FILE, loadGraphOutcome } from "../graph
 import { git } from "../query/branches.ts";
 import { currentHead, readIndexCoverage } from "./coverage-file.ts";
 import type { IndexCoverageFile } from "./coverage-file.ts";
-import { chooseProbe, FILE_MANIFEST, verifyFileManifest } from "./file-manifest.ts";
+import { checkContentDrift, chooseProbe, FILE_MANIFEST, readFileManifest, verifyFileManifest } from "./file-manifest.ts";
+import type { ContentDriftReport } from "./file-manifest.ts";
 import { isError, search } from "../query/search.ts";
 
 export type Level = "PASS" | "WARN" | "FAIL";
@@ -37,6 +38,7 @@ export interface ReviewRules {
   withheldSecretGrowth: Threshold;
   newSymlinks: Threshold;
   indexAgeHours: Threshold;
+  contentDrift: Threshold;
   staleHead: Level;
   secretGuardOff: Level;
   missingCoverageFile: Level;
@@ -46,6 +48,7 @@ export interface ReviewRules {
   uncoveredTargets: Level;
   unreadableTargets: Level;
   regression: Level;
+  silentEdit: Level;
   maxDetails: number;
 }
 
@@ -58,6 +61,7 @@ export const DEFAULT_RULES: Readonly<ReviewRules> = Object.freeze({
   withheldSecretGrowth: { warnAbove: 0, failAbove: null },
   newSymlinks: { warnAbove: 0, failAbove: null },
   indexAgeHours: { warnAbove: 24, failAbove: null },
+  contentDrift: { warnAbove: 0, failAbove: null },
   staleHead: "WARN",
   secretGuardOff: "WARN",
   missingCoverageFile: "WARN",
@@ -67,11 +71,12 @@ export const DEFAULT_RULES: Readonly<ReviewRules> = Object.freeze({
   uncoveredTargets: "WARN",
   unreadableTargets: "FAIL",
   regression: "WARN",
+  silentEdit: "FAIL",
   maxDetails: 20,
 });
 
-const THRESHOLD_KEYS = ["unexplainedMissing", "gapGrowth", "unreadable", "overSize", "refused", "withheldSecretGrowth", "newSymlinks", "indexAgeHours"] as const;
-const LEVEL_KEYS = ["staleHead", "secretGuardOff", "missingCoverageFile", "cappedResults", "emptyResults", "uncoveredTargets", "unreadableTargets", "regression"] as const;
+const THRESHOLD_KEYS = ["unexplainedMissing", "gapGrowth", "unreadable", "overSize", "refused", "withheldSecretGrowth", "newSymlinks", "indexAgeHours", "contentDrift"] as const;
+const LEVEL_KEYS = ["staleHead", "secretGuardOff", "missingCoverageFile", "cappedResults", "emptyResults", "uncoveredTargets", "unreadableTargets", "regression", "silentEdit"] as const;
 const NUMBER_KEYS = ["resultLimit", "maxDetails"] as const;
 
 const RANK: Record<Level, number> = { PASS: 0, WARN: 1, FAIL: 2 };
@@ -165,7 +170,7 @@ async function readBaseline(file: string): Promise<Baseline | null> {
 
 // ---------------------------------------------------------------------------
 
-export interface ReviewOptions { rules?: ReviewRules; rulesSource?: string; outDir?: string; baselineFile?: string; now?: number; write?: boolean; }
+export interface ReviewOptions { rules?: ReviewRules; rulesSource?: string; outDir?: string; baselineFile?: string; now?: number; write?: boolean; deep?: boolean; }
 export interface ReviewResult {
   kind: "myco-review"; version: 1; root: string; generatedAt: string; rulesSource: string;
   status: Level; exitCode: number; counts: Record<Level, number>; checks: Check[];
@@ -186,6 +191,36 @@ async function gitList(root: string, args: string[]): Promise<string[] | null> {
   const r = await git(root, args);
   if (r.code !== 0) return null;
   return r.stdout.split("\0").filter((s) => s !== "").map(posix);
+}
+
+/** Map a content-drift report to a check result (exported for tests). */
+export function contentDigestVerdict(d: ContentDriftReport, rules: ReviewRules): [Level, string, string[]] {
+  if (d.error !== null) return ["FAIL", `content digests could not be verified: ${d.error}`, []];
+  const details = [
+    ...d.silent.map((p) => `silent: ${p}`),
+    ...d.changed.map((p) => `changed: ${p}`),
+    ...d.deleted.map((p) => `deleted: ${p}`),
+    ...d.unreadable.map((p) => `unreadable: ${p}`),
+    ...d.unhashed.map((p) => `unhashed: ${p}`),
+  ];
+  if (d.silent.length > 0) {
+    const why = d.mode.startsWith("pinned")
+      ? "recorded digest(s) disagree with the pinned commit the manifest names (rewritten manifest)"
+      : "content changed while byte length + mtime stayed the same (mtime-preserving edit or rewritten manifest)";
+    return [rules.silentEdit, `${d.silent.length} file(s): ${why} - re-run: myco index`, details];
+  }
+  const stale = d.changed.length + d.deleted.length;
+  const level = worst([levelFor(stale, rules.contentDrift), d.unreadable.length > 0 ? "WARN" : "PASS"]);
+  if (stale > 0) {
+    return [level, `index is stale: ${d.changed.length} file(s) changed and ${d.deleted.length} gone since the last refresh - search answers may come from older content; re-run: myco index`, details];
+  }
+  if (d.mode === "pinned") return [level, "pinned index: content is fixed by the commit (use --deep to re-verify blob digests)", details];
+  const extra = [
+    d.touched > 0 ? `${d.touched} touched with the same content` : "",
+    d.unhashed.length > 0 ? `${d.unhashed.length} not hashed (over cap)` : "",
+    d.unreadable.length > 0 ? `${d.unreadable.length} unreadable now` : "",
+  ].filter((s) => s !== "").join(", ");
+  return [level, `${d.checked} file(s) re-hashed (${d.mode}), no content drift${extra ? `; ${extra}` : ""}`, details];
 }
 
 export async function reviewRepo(rootIn: string, opts: ReviewOptions = {}): Promise<ReviewResult> {
@@ -254,6 +289,13 @@ export async function reviewRepo(rootIn: string, opts: ReviewOptions = {}): Prom
     } else {
       const src = verdict.source;
       add("index.file-manifest", "Per-file sha256 manifest", "PASS", `${verdict.fileCount} file(s) match the manifest${src ? ` (${src.repo}@${src.commit ? src.commit.slice(0, 12) : "WORKTREE"}${src.pinned ? ", pinned" : ""})` : ""}`);
+      // 2c. content digests (MYCO-HARD-1c): only once the manifest itself is sound.
+      const m = await readFileManifest(root);
+      if (typeof m === "object") {
+        const drift = await checkContentDrift(root, m, { deep: opts.deep === true });
+        const [status, reason, details] = contentDigestVerdict(drift, rules);
+        add("index.content-digest", "Indexed content vs recorded sha256", status, reason, details);
+      }
     }
     const probe = chooseProbe(loaded.graph);
     if (probe === null) {

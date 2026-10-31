@@ -52,6 +52,8 @@ REVIEW (deterministic, no AI)
       --out DIR       check: review dir (default .myco/review); run-all: status dir
       --config FILE   run-all: repos config ({"repos":[{"path":".."}]})
       --no-index      run-all: review only, skip the index step
+      --deep          check: re-hash every indexed file (not only ones whose
+                      size/mtime moved); pinned indexes re-verify git blobs
   check writes review.md, review.json and baseline.json. Exit: 0 PASS, 1 WARN, 2 FAIL.
 
 MATCHING
@@ -718,6 +720,7 @@ async function cmdCheck(root: string, values: Record<string, unknown>): Promise<
   const result = await reviewRepo(root, {
     rules: loaded.rules,
     rulesSource: loaded.source,
+    deep: Boolean(values["deep"]),
     ...(values["out"] !== undefined ? { outDir: path.resolve(String(values["out"])) } : {}),
   });
   process.stdout.write((values["json"] ? terminalJson(result) : renderReviewText(result).split("\n").map((l) => terminalData(l)).join("\n")) + "\n");
@@ -774,6 +777,7 @@ async function run(argv: string[]): Promise<number> {
       out: { type: "string" },
       config: { type: "string" },
       "no-index": { type: "boolean" },
+      deep: { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
     },
