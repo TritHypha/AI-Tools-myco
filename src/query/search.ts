@@ -100,6 +100,10 @@ export interface SearchResult {
   skippedCoverage?: { largePaths: string[]; vendoredDirs: string[] };
   /** Fail-closed: false whenever unknown is non-empty or coverage is incomplete. */
   complete: boolean;
+  /** repo@commit the stored index was built from (from .myco/index-files.json); null if unknown. */
+  source?: { repo: string; commit: string | null; pinned: boolean } | null;
+  /** File-manifest verdict for the stored index ("unusable" forces complete=false). */
+  indexManifest?: { state: "ok" | "absent" | "unusable"; reasons: string[] };
 }
 
 export interface LongLineRefusal {

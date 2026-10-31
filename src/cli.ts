@@ -29,6 +29,8 @@ import { compareTree, filterActive, listTargets, renderCoverage, repoTop, search
 import type { Coverage, TargetFilter } from "./query/branches.ts";
 import { terminalData, terminalJson } from "./util/terminal.ts";
 import { writeIndexCoverage } from "./review/coverage-file.ts";
+import { verifyFileManifest, writeFileManifest } from "./review/file-manifest.ts";
+import type { ManifestVerdict } from "./review/file-manifest.ts";
 import { loadRules, renderReviewText, reviewRepo } from "./review/check.ts";
 import { runAll } from "./review/run-all.ts";
 
@@ -244,6 +246,7 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
     skippedSymlinkPaths,
     withheldSecretPaths,
     submodulePaths,
+    graph: indexedGraph,
   } = await buildIndex(root, index);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   // Informational output → stdout. stderr is reserved for real errors (which all
@@ -354,6 +357,13 @@ async function cmdIndex(root: string, index: IndexOptions, filter?: TargetFilter
   }).catch((e: unknown) => {
     process.stdout.write(`myco: note — coverage summary for \`myco check\` NOT written: ${terminalData((e as Error).message)}\n`);
   });
+  // Per-file sha256 manifest (MYCO-HARD-1 item 3): only when the graph was stored,
+  // so the manifest always describes the index on disk.
+  if (saved.written) {
+    await writeFileManifest(root, indexedGraph, { pinnedCommit: stats.pinnedCommit ?? null }).catch((e: unknown) => {
+      process.stdout.write(`myco: note - file manifest NOT written: ${terminalData((e as Error).message)}\n`);
+    });
+  }
   await printIndexCoverage(
     root,
     stats.files,
@@ -478,6 +488,7 @@ async function cmdSearch(
   let unreadableDuringRefresh: string[] = [];
   let skippedLargeDuringRefresh: string[] = [];
   let skippedVendoredDuringRefresh: string[] = [];
+  let manifestVerdict: ManifestVerdict | null = null;
   if (targetStat?.isFile()) {
     // --in scopes a TREE; the target here is one named file, so the flag can only
     // be a mistake — either the user meant a different root, or they expect a
@@ -498,6 +509,8 @@ async function cmdSearch(
         return 2;
       }
       graph = loaded.graph;
+      // No refresh: the stored index must still agree with its file manifest.
+      manifestVerdict = await verifyFileManifest(root, graph);
     } else {
       // Say WHICH of the two reasons applies. Reporting a refused index as a
       // "first run" is how a rejected cache stayed invisible: the message
@@ -517,6 +530,10 @@ async function cmdSearch(
       unreadableDuringRefresh = built.unreadablePaths;
       skippedLargeDuringRefresh = built.skippedLargePaths;
       skippedVendoredDuringRefresh = built.skippedVendoredDirs;
+      if (built.saved.written) {
+        await writeFileManifest(root, graph).catch(() => undefined);
+      }
+      manifestVerdict = await verifyFileManifest(root, graph);
       if (!values["json"]) noteSaveOutcome(built.saved);
       // Surface an over-size skip even on the search path — otherwise an oversized file
       // silently misses and a zero-result reads as "absent" (the recurring "we keep
@@ -537,6 +554,14 @@ async function cmdSearch(
       }
     }
     outcome = await search(root, graph, pattern, sOpts);
+    if (!isError(outcome) && manifestVerdict !== null) {
+      outcome = { ...outcome, source: manifestVerdict.source, indexManifest: { state: manifestVerdict.state, reasons: manifestVerdict.reasons } };
+      if (manifestVerdict.state === "unusable") {
+        // Fail closed: a drifted index cannot prove presence or absence.
+        outcome = { ...outcome, complete: false };
+        process.stderr.write(`myco: index UNUSABLE - ${terminalData(manifestVerdict.reasons.join("; "))} - re-run: myco index\n`);
+      }
+    }
     if (!isError(outcome) && unreadableDuringRefresh.length > 0) {
       const unreadablePaths = [...new Set([...(outcome.unreadablePaths ?? []), ...unreadableDuringRefresh])];
       outcome = { ...outcome, complete: false, unreadablePaths };
