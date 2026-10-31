@@ -307,6 +307,7 @@ deterministic rules: no AI, no network, the same input always gives the same ver
 myco index .
 myco check .            # alias: myco review .
 myco check . --json     # machine-readable result on stdout
+myco check . --deep     # also re-hash files whose size and mtime look unchanged
 ```
 
 It reads `.myco/index-manifest.json` (or the legacy `index.json`), the coverage file
@@ -327,6 +328,7 @@ verdict does; the next run compares against it). Exit code: **0** all PASS,
 | `index.unreadable` / `index.skipped` – unreadable and over-size files | WARN when > 0 |
 | `index.secret-guard` – withheld-secret file count (never values); growth; guard OFF | WARN on growth or OFF |
 | `index.symlinks` – new symlinks since the last review | WARN |
+| `index.content-digest` – recorded per-file sha256 vs content now (quick: files whose size/mtime moved; `--deep`: every file, or the pinned commit's blobs) | WARN on edited/deleted files (`contentDrift`), FAIL on a digest change under unchanged size + mtime or a pinned digest that disagrees with its commit (`silentEdit`) |
 | `index.stale` – index built at a different HEAD | WARN |
 | `index.age` – index older than 24 h | WARN |
 | `results.present` / `results.summaries` – every results folder has `summary.md` + `summary.json`; no orphan target folders | FAIL |

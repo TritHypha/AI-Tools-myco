@@ -18,6 +18,14 @@
 //   - probeSearch(): `myco check` picks one indexed term from a deterministic file
 //     and runs a real search for it; the file must come back. A failed probe is
 //     UNUSABLE.
+//   - checkContentDrift(): (MYCO-HARD-1c) compare the recorded digests with the
+//     content that is there now. Quick mode re-hashes only files whose byte
+//     length or mtime moved; --deep re-hashes every file, which also catches an
+//     edit that preserved length + mtime (or a manifest whose digests were
+//     rewritten). Pinned manifests are re-verified against the blobs of the
+//     commit they name. Content drift means search answers come from older
+//     content (stale, `myco check` WARN); a digest that changed under unchanged
+//     metadata, or a pinned digest that disagrees with its own commit, is FAIL.
 // Search results cite `repo@commit:path:line` from the manifest's source (JSON
 // field `citation`, additive - existing fields are unchanged).
 //
@@ -61,6 +69,20 @@ export interface ManifestVerdict {
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
+/**
+ * A manifest path must be a plain repo-relative path: no absolute, UNC or drive
+ * prefix, no NUL, and no empty / "." / ".." segment (split on "/" and "\\").
+ * Anything else could steer a content re-hash outside the repo, so the whole
+ * manifest is refused (malformed => UNUSABLE).
+ */
+export function isSafeManifestPath(p: string): boolean {
+  if (p === "" || p.length > 4096 || p.includes("\u0000")) return false;
+  if (p.startsWith("/") || p.startsWith("\\") || /^[A-Za-z]:(?:[\\/]|$)/.test(p)) return false;
+  // Split on both separators: a backslash is a separator on Windows, so
+  // "..\x" must be refused even though it is one posix segment.
+  return p.split(/[\\/]/).every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
 function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -100,7 +122,7 @@ export async function readFileManifest(root: string): Promise<FileManifest | "ab
   for (const e of m.files as unknown[]) {
     if (typeof e !== "object" || e === null) return "invalid";
     const f = e as Record<string, unknown>;
-    if (typeof f.path !== "string" || f.path === "" || !Number.isSafeInteger(f.bytes) || (f.bytes as number) < 0
+    if (typeof f.path !== "string" || !isSafeManifestPath(f.path) || !Number.isSafeInteger(f.bytes) || (f.bytes as number) < 0
       || typeof f.mtimeMs !== "number"
       || !(f.sha256 === null || (typeof f.sha256 === "string" && SHA256_HEX.test(f.sha256)))) return "invalid";
   }
@@ -225,4 +247,101 @@ export function chooseProbe(graph: SearchGraph): { path: string; term: string } 
     if (cands.length > 0) return { path: rec.path, term: cands[0] as string };
   }
   return null;
+}
+// ---------------------------------------------------------------------------
+// Content drift (MYCO-HARD-1c): recorded digest vs the content there now.
+
+export type DriftMode = "quick" | "deep" | "pinned" | "pinned-deep";
+export interface ContentDriftReport {
+  mode: DriftMode;
+  /** Entries whose current content was actually hashed and compared. */
+  checked: number;
+  /** Content differs from the recorded digest (file edited since the refresh). */
+  changed: string[];
+  /** Listed in the manifest but no longer a regular file (deleted / replaced / now a symlink). */
+  deleted: string[];
+  /**
+   * Digest differs although bytes + mtime match the record (deep), or a pinned
+   * digest disagrees with the commit the manifest names: an mtime-preserving
+   * edit or a rewritten manifest. Never benign.
+   */
+  silent: string[];
+  /** Metadata moved but the digest still matches (e.g. touch / checkout). */
+  touched: number;
+  /** Recorded sha256 is null (over the hash cap, or unreadable at refresh). */
+  unhashed: string[];
+  /** Exists but could not be read now. */
+  unreadable: string[];
+  /** Set when the comparison could not run at all (e.g. pinned commit gone). */
+  error: string | null;
+}
+
+function emptyReport(mode: DriftMode): ContentDriftReport {
+  return { mode, checked: 0, changed: [], deleted: [], silent: [], touched: 0, unhashed: [], unreadable: [], error: null };
+}
+
+/**
+ * Compare `m` with the content now on disk (or, for a pinned manifest, in the
+ * commit it names). Never follows symlinks; never reads outside `root` (paths
+ * were validated by readFileManifest). Read-only.
+ */
+export async function checkContentDrift(
+  root: string,
+  m: FileManifest,
+  opts: { deep?: boolean } = {},
+): Promise<ContentDriftReport> {
+  const deep = opts.deep === true;
+  if (m.source.pinned) {
+    const r = emptyReport(deep ? "pinned-deep" : "pinned");
+    if (!deep) return r;
+    if (m.source.commit === null) { r.error = "pinned manifest names no commit"; return r; }
+    let blobs: Map<string, string>;
+    try {
+      blobs = new Map(pinnedListing(root, m.source.commit).entries.map((e) => [e.relPath, e.blob] as [string, string]));
+    } catch (e) {
+      r.error = `pinned commit ${m.source.commit.slice(0, 12)} cannot be listed: ${(e as Error).message}`;
+      return r;
+    }
+    for (const e of m.files) {
+      if (e.sha256 === null) { r.unhashed.push(e.path); continue; }
+      const blob = blobs.get(e.path);
+      if (blob === undefined) { r.silent.push(e.path); continue; }
+      let digest: string;
+      try { digest = sha256(readPinnedBlob(root, blob)); } catch { r.unreadable.push(e.path); continue; }
+      r.checked++;
+      if (digest !== e.sha256) r.silent.push(e.path);
+    }
+    return r;
+  }
+  const r = emptyReport(deep ? "deep" : "quick");
+  const unsafe = m.files.find((e) => !isSafeManifestPath(e.path));
+  if (unsafe !== undefined) { r.error = `manifest path ${JSON.stringify(unsafe.path)} is not a safe repo-relative path`; return r; }
+  for (const e of m.files) {
+    const abs = path.join(root, ...e.path.split("/"));
+    let st: import("node:fs").Stats;
+    try {
+      st = await fs.lstat(abs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") r.deleted.push(e.path);
+      else r.unreadable.push(e.path);
+      continue;
+    }
+    if (!st.isFile()) { r.deleted.push(e.path); continue; }
+    const sameMeta = st.size === e.bytes && st.mtimeMs === e.mtimeMs;
+    if (e.sha256 === null) {
+      if (!sameMeta) r.changed.push(e.path);
+      else r.unhashed.push(e.path);
+      continue;
+    }
+    if (sameMeta && !deep) continue;
+    if (st.size > MANIFEST_HASH_CAP_BYTES) { r.changed.push(e.path); continue; }
+    let digest: string;
+    try { digest = await streamSha256(abs); } catch { r.unreadable.push(e.path); continue; }
+    r.checked++;
+    if (digest === e.sha256) { if (!sameMeta) r.touched++; continue; }
+    if (sameMeta) r.silent.push(e.path);
+    else r.changed.push(e.path);
+  }
+  return r;
 }

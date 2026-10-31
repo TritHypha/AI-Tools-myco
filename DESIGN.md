@@ -355,3 +355,32 @@ Search JSON gains additive fields only: `matches[].citation`
 (`repo@<12-hex commit>:path:line`, or `repo@WORKTREE:...` outside git),
 top-level `source` and `indexManifest {state, reasons}`. Text output, exit codes
 for healthy indexes, `--max-size` and `--limit` are unchanged.
+
+### Content drift (MYCO-HARD-1c)
+
+The manifest check above proves the manifest and the graph agree; it says nothing
+about whether the files still hold what was hashed. `myco check` therefore adds
+`index.content-digest` once the manifest is sound:
+
+- **Quick (default):** `lstat` every listed path (never following symlinks). A path
+  that is gone or no longer a regular file is *deleted*; a file whose byte length
+  or mtime moved is re-hashed (streamed, same 256 MiB cap) and is *changed* if the
+  digest differs, *touched* if it does not. Files with unchanged metadata are not
+  read, so the check stays as cheap as a refresh.
+- **Deep (`--deep`):** every file is re-hashed. A digest that differs while length
+  and mtime match the record is *silent*: an mtime-preserving edit or a manifest
+  whose digests were rewritten.
+- **Pinned (`--at`):** the content is fixed by the commit, so quick mode reports
+  PASS without reading the working folder. `--deep` re-reads each listed blob from
+  the pinned commit; a digest that disagrees, or a path the commit does not have,
+  is *silent*; a commit that can no longer be listed is FAIL.
+
+Changed + deleted counts go through the `contentDrift` threshold (default WARN
+above 0: the index is stale and answers may be older content; re-run `myco
+index`). Any silent entry takes the `silentEdit` level (default FAIL). Unhashed
+(over-cap) entries are listed but not judged; unreadable-now entries are WARN.
+
+Manifest paths are validated when read: absolute, UNC or drive-prefixed paths, NUL,
+and empty / `.` / `..` segments (splitting on both `/` and `\`) make the manifest
+malformed, which is UNUSABLE. `checkContentDrift` repeats the check for manifests
+built in memory, so no path in a manifest can steer a read outside the repo.

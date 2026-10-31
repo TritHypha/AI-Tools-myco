@@ -14,6 +14,20 @@ that the silence was the defect, not the narrowing.
 
 ### Added
 
+- **Content drift in `myco check` (MYCO-HARD-1c, 2026-10-31).** New check
+  `index.content-digest` compares each file's recorded sha256 in
+  `.myco/index-files.json` with the content there now. Quick mode re-hashes only
+  files whose byte length or mtime moved; `myco check --deep` re-hashes every file
+  and catches an edit that kept length + mtime, or a rewritten digest (rule
+  `silentEdit`, default FAIL). Edited or deleted files since the refresh mean
+  search answers may come from older content (rule `contentDrift`, default WARN
+  above 0). Pinned (`--at`) indexes are fixed by their commit; `--deep` re-verifies
+  each digest against the commit's blobs. Manifest paths that are absolute, UNC,
+  drive-prefixed or contain empty / `.` / `..` segments (on `/` or `\`) now make
+  the manifest malformed (UNUSABLE), so a re-hash can never leave the repo.
+- **Fixed:** `myco links` no longer reports every absolute or `file:` URL link as
+  `TEMP_REFERENCE` when the scanned root itself lives under `/tmp` or `%TEMP%`; a
+  reference inside the root is judged on its root-relative part.
 - **Passive review (MYCO-REVIEW-1, 2026-10-29).** `myco check` (alias `review`)
   reviews the index and `.myco/results` with fixed rules, no AI: indexed vs
   `git ls-files` with every gap explained, gap growth, unreadable / over-size,
