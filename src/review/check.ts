@@ -21,6 +21,8 @@ import { INDEX_DIR, INDEX_FILE, MANIFEST_FILE, loadGraphOutcome } from "../graph
 import { git } from "../query/branches.ts";
 import { currentHead, readIndexCoverage } from "./coverage-file.ts";
 import type { IndexCoverageFile } from "./coverage-file.ts";
+import { chooseProbe, FILE_MANIFEST, verifyFileManifest } from "./file-manifest.ts";
+import { isError, search } from "../query/search.ts";
 
 export type Level = "PASS" | "WARN" | "FAIL";
 export interface Check { id: string; title: string; status: Level; reason: string; details: string[]; }
@@ -236,6 +238,39 @@ export async function reviewRepo(rootIn: string, opts: ReviewOptions = {}): Prom
     add("index.integrity", "Shard sha256 integrity", "PASS", "single-file (legacy) layout — no shards to verify; the loader validates index.json");
   } else {
     add("index.integrity", "Shard sha256 integrity", "PASS", "no stored index — nothing to verify (see index.present)");
+  }
+
+  // 2b. per-file sha256 manifest + probe search (MYCO-HARD-1 item 3) --------
+  // Drift between the stored graph and .myco/index-files.json, a malformed
+  // manifest, or a probe search that cannot find a term the index says a file
+  // holds, all mark the index UNUSABLE (FAIL). A missing manifest (index built
+  // before this file existed) is reported at the missingCoverageFile level.
+  if (loaded.status === "ok") {
+    const verdict = await verifyFileManifest(root, loaded.graph);
+    if (verdict.state === "absent") {
+      add("index.file-manifest", "Per-file sha256 manifest", rules.missingCoverageFile, `${INDEX_DIR}/${FILE_MANIFEST} is missing - the index predates it; re-run: myco index`);
+    } else if (verdict.state === "unusable") {
+      add("index.file-manifest", "Per-file sha256 manifest", "FAIL", "index UNUSABLE: the stored index and its file manifest disagree", verdict.reasons);
+    } else {
+      const src = verdict.source;
+      add("index.file-manifest", "Per-file sha256 manifest", "PASS", `${verdict.fileCount} file(s) match the manifest${src ? ` (${src.repo}@${src.commit ? src.commit.slice(0, 12) : "WORKTREE"}${src.pinned ? ", pinned" : ""})` : ""}`);
+    }
+    const probe = chooseProbe(loaded.graph);
+    if (probe === null) {
+      add("index.probe", "Probe search", "PASS", "no content terms in the index - nothing to probe");
+    } else {
+      const res = await search(root, loaded.graph, probe.term, { mode: "word", caseSensitive: false, files: false, limit: 100_000, context: 0 })
+        .catch((e: unknown) => ({ error: (e as Error).message }));
+      if (isError(res)) {
+        add("index.probe", "Probe search", "FAIL", `index UNUSABLE: probe search for ${JSON.stringify(probe.term)} errored: ${res.error}`);
+      } else if (res.matches.some((m) => m.path === probe.path)) {
+        add("index.probe", "Probe search", "PASS", `probe ${JSON.stringify(probe.term)} found in ${probe.path}`);
+      } else if (res.resultLimitExceeded || res.searchTimeBudgetExceeded) {
+        add("index.probe", "Probe search", "WARN", `probe ${JSON.stringify(probe.term)} inconclusive (result cap or time budget hit before ${probe.path})`);
+      } else {
+        add("index.probe", "Probe search", "FAIL", `index UNUSABLE: the index says ${probe.path} contains ${JSON.stringify(probe.term)} but a search did not find it (stale or tampered index) - re-run: myco index`);
+      }
+    }
   }
 
   // 3. coverage file ----------------------------------------------------------

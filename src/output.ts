@@ -5,6 +5,7 @@
 // separators; context lines use "-", so the two are visually distinguishable
 // and still pipe-friendly.
 
+import { citeOf } from "./review/file-manifest.ts";
 import type { Match, SearchResult } from "./query/search.ts";
 import { MAX_REGEX_LINE_LEN } from "./query/regex-guard.ts";
 import { terminalData, terminalJson } from "./util/terminal.ts";
@@ -121,7 +122,11 @@ export function render(
           col: m.col,
           length: m.length,
           text: m.text,
+          // Additive (MYCO-HARD-1 item 4): repo@commit:path[:line], when the source is known.
+          ...(result.source ? { citation: citeOf(result.source, m.path, m.line) } : {}),
         })),
+        ...(result.source !== undefined ? { source: result.source } : {}),
+        ...(result.indexManifest !== undefined ? { indexManifest: result.indexManifest } : {}),
         unknown: result.unknown,
         complete: result.complete,
         skippedCoverage: result.skippedCoverage ?? { largePaths: [], vendoredDirs: [] },

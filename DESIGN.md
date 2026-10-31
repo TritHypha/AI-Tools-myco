@@ -330,3 +330,28 @@ index and its results tree are complete and well-formed. It is deliberately
 - **Tests.** `test/review.test.ts` (RV-01..RV-20) builds synthetic repos and results
   for every rule and exit code; `scripts/mutate-review.mjs` breaks 11 key rules and
   requires the suite to catch each one.
+
+## Per-file manifest and citations (MYCO-HARD-1 items 3 + 4)
+
+Every refresh that stores the graph (`myco index`, and the refresh inside
+`myco search`) also writes `.myco/index-files.json` (`kind: "myco-file-manifest"`,
+`version: 1`): one entry per indexed file with `path`, `bytes`, `mtimeMs` and
+`sha256` (null above 256 MiB or if unreadable), plus `source: {repo, commit,
+pinned}`. With `--at REV` the digests are of the pinned git blobs and `commit` is
+the pinned SHA; otherwise `commit` is HEAD at index time. Unchanged files
+(same bytes + mtime) reuse the previous digest, so a refresh stays cheap.
+
+The stored index is **UNUSABLE** when the manifest and the graph disagree (file
+count drift, missing/extra/duplicate paths) or the manifest is malformed:
+`myco search --no-refresh` keeps its matches as evidence but reports
+`complete: false`, prints `myco: index UNUSABLE - <reason>` on stderr and exits 2;
+`myco check` FAILs `index.file-manifest`. `myco check` also runs a probe search
+(`index.probe`) for a term the index says the first content file holds; a miss
+is UNUSABLE (FAIL), a cap/budget hit is WARN. A missing manifest (an index built
+before this existed) is never UNUSABLE; `check` reports it at the
+`missingCoverageFile` level.
+
+Search JSON gains additive fields only: `matches[].citation`
+(`repo@<12-hex commit>:path:line`, or `repo@WORKTREE:...` outside git),
+top-level `source` and `indexManifest {state, reasons}`. Text output, exit codes
+for healthy indexes, `--max-size` and `--limit` are unchanged.
